@@ -22,6 +22,40 @@ st.write(
 # -----------------------------
 # Text Extraction Helpers
 # -----------------------------
+def get_relevant_job_lines(job_text):
+    text = job_text.lower()
+
+    lines = [line.strip() for line in job_text.split("\n") if line.strip()]
+
+    relevant_lines = []
+
+    allowed_sections = [
+        "qualifications",
+        "requirements",
+        "experience",
+        "skills"
+    ]
+
+    current_section = None
+
+    for line in lines:
+        lower_line = line.lower()
+
+        # detect section headers
+        if any(section in lower_line for section in allowed_sections):
+            current_section = lower_line
+            continue
+
+        # stop when hitting unrelated sections
+        if any(stop in lower_line for stop in [
+            "benefits", "compensation", "about", "environment"
+        ]):
+            current_section = None
+
+        if current_section:
+            relevant_lines.append(line)
+
+    return relevant_lines
 def extract_text_from_pdf(uploaded_file):
     text = ""
     with pdfplumber.open(uploaded_file) as pdf:
