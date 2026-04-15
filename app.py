@@ -17,14 +17,11 @@ st.title("HireSense")
 st.subheader("AI Resume & Job Description Matching Web Application")
 
 st.write(
-    "Upload your resume and paste a job description to receive a match score, "
-    "AI-extracted skills, and AI-generated recommendations."
+    "Upload a resume and paste a job description to receive an overall match score, "
+    "AI-extracted skills, and AI-generated improvement suggestions."
 )
 
 
-# =========================================================
-# LOAD MODELS
-# =========================================================
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -91,51 +88,92 @@ def clean_text(text):
     return text.strip()
 
 
+def normalize_skill_text(skill):
+    skill = skill.lower().strip()
+    skill = re.sub(r"^[\-\*\•\d\.\)\(]+", "", skill)
+    skill = re.sub(r"[^a-zA-Z0-9\+\#\.\-/& ]", "", skill)
+    skill = re.sub(r"\s+", " ", skill).strip()
+    return skill
+
+
+def is_valid_skill(skill):
+    if not skill:
+        return False
+
+    if len(skill) < 2 or len(skill) > 50:
+        return False
+
+    bad_exact = {
+        "none", "n/a", "na", "resume", "job", "description", "candidate",
+        "employee", "applicant", "role", "position", "company", "organization"
+    }
+
+    if skill in bad_exact:
+        return False
+
+    bad_contains = [
+        "@", "http", "www", ".com", ".org", ".edu",
+        "benefits", "salary", "compensation", "location",
+        "equal opportunity", "full time", "part time"
+    ]
+
+    if any(bad in skill for bad in bad_contains):
+        return False
+
+    if skill.isdigit():
+        return False
+
+    return True
+
+
 # =========================================================
 # AI SKILL EXTRACTION
 # =========================================================
 def ai_extract_skills(text):
     prompt = f"""
-Extract ONLY technical skills, tools, programming languages, libraries, software, and platforms.
+Extract only job-relevant skills from the text below.
 
-STRICT RULES:
-- NO locations
-- NO benefits
-- NO company names
-- NO universities
-- NO people's names
-- NO dates
-- NO soft skills
-- ONLY real technical skills
+Include:
+- technical skills
+- software
+- tools
+- platforms
+- programming languages
+- certifications
+- domain-specific skills
+- industry methods
+- relevant professional competencies
 
-Return ONLY a clean comma-separated list.
-Do not explain anything.
+Do NOT include:
+- company names
+- locations
+- dates
+- benefits
+- salary information
+- personal names
+- generic filler words
+
+Return only a comma-separated list with no explanation.
 
 Text:
-{text[:2000]}
+{text[:2500]}
 """
 
     try:
-        result = generator(prompt, max_length=150, do_sample=False)
+        result = generator(prompt, max_length=180, do_sample=False)
         output = result[0]["generated_text"]
 
-        skills = [s.strip().lower() for s in output.split(",") if s.strip()]
+        raw_skills = [s.strip() for s in output.split(",") if s.strip()]
+        cleaned_skills = []
 
-        blacklist = {
-            "colorado", "company", "benefits", "environment",
-            "fort collins", "denver", "university",
-            "communication", "leadership", "teamwork"
-        }
+        for skill in raw_skills:
+            skill = normalize_skill_text(skill)
+            if is_valid_skill(skill):
+                cleaned_skills.append(skill)
 
-        cleaned = []
-        for skill in skills:
-            skill = re.sub(r"[^a-zA-Z0-9\+\#\.\-/ ]", "", skill).strip()
-            if skill and skill not in blacklist and len(skill) < 40:
-                cleaned.append(skill)
+        return sorted(list(set(cleaned_skills)))
 
-        return sorted(list(set(cleaned)))
-
-    except:
+    except Exception:
         return []
 
 
@@ -167,40 +205,56 @@ def compare_skills(resume_text, job_text):
 # =========================================================
 # LLM SUGGESTIONS
 # =========================================================
-def generate_llm_suggestions(resume_text, job_text, missing_skills):
+def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills):
     prompt = f"""
-You are a resume assistant.
+You are a professional resume assistant.
+
+Compare the resume and the job description below.
 
 Resume:
-{resume_text[:2000]}
+{resume_text[:2200]}
 
 Job Description:
-{job_text[:2000]}
+{job_text[:2200]}
+
+Matched Skills:
+{", ".join(matched_skills)}
 
 Missing Skills:
 {", ".join(missing_skills)}
 
-Give:
-1. 3 improvements
-2. 2 bullet rewrites
-3. short summary
+Provide:
+1. Three practical improvements to make the resume better fit the job
+2. Two stronger bullet point rewrite ideas
+3. One short professional summary tailored to the job
 
-Keep it concise.
+Rules:
+- Work for any profession or industry
+- Be specific and practical
+- Do not invent fake experience
+- Only recommend adding skills if the person actually has them
+- Keep the response concise
 """
 
     try:
-        result = generator(prompt, max_length=200, do_sample=False)
+        result = generator(prompt, max_length=260, do_sample=False)
         return result[0]["generated_text"]
-    except:
-        return "LLM unavailable."
+    except Exception:
+        return "AI suggestions are unavailable right now."
 
 
 # =========================================================
 # UI
 # =========================================================
-uploaded_resume = st.file_uploader("Upload Resume", type=["pdf", "docx", "txt"])
+uploaded_resume = st.file_uploader(
+    "Upload Resume",
+    type=["pdf", "docx", "txt"]
+)
 
-job_description = st.text_area("Paste Job Description", height=300)
+job_description = st.text_area(
+    "Paste Job Description",
+    height=300
+)
 
 analyze = st.button("Analyze")
 
@@ -210,9 +264,9 @@ analyze = st.button("Analyze")
 # =========================================================
 if analyze:
     if uploaded_resume is None:
-        st.warning("Upload resume.")
+        st.warning("Please upload a resume.")
     elif not job_description.strip():
-        st.warning("Paste job description.")
+        st.warning("Please paste a job description.")
     else:
         with st.spinner("Analyzing..."):
             start = time.time()
@@ -230,39 +284,50 @@ if analyze:
                 clean_job
             )
 
-            llm_output = generate_llm_suggestions(clean_resume, clean_job, missing)
+            llm_output = generate_llm_suggestions(
+                clean_resume,
+                clean_job,
+                matched,
+                missing
+            )
 
             latency = round(time.time() - start, 2)
 
-        st.success("Done")
+        st.success("Analysis complete.")
 
         col1, col2 = st.columns(2)
 
         with col1:
-            st.metric("Match Score", f"{score}%")
+            st.metric("Overall Match Score", f"{score}%")
             st.metric("Skill Match %", f"{percent}%")
 
         with col2:
             st.metric("Matched Skills", len(matched))
             st.metric("Missing Skills", len(missing))
 
-        st.markdown("## Skills from Job")
-        st.write(", ".join(job_skills))
+        st.markdown("## Skills Extracted from Job Description")
+        st.write(", ".join(sorted(job_skills)) if job_skills else "No skills found.")
 
-        st.markdown("## Skills from Resume")
-        st.write(", ".join(resume_skills))
+        st.markdown("## Skills Extracted from Resume")
+        st.write(", ".join(sorted(resume_skills)) if resume_skills else "No skills found.")
 
         st.markdown("## Matched Skills")
-        st.write(", ".join(matched))
+        st.write(", ".join(matched) if matched else "No matched skills found.")
 
         st.markdown("## Missing Skills")
-        st.write(", ".join(missing))
+        st.write(", ".join(missing) if missing else "No missing skills found.")
 
-        st.markdown("## Extra Resume Skills")
-        st.write(", ".join(extra))
+        st.markdown("## Extra Skills from Resume")
+        st.write(", ".join(extra) if extra else "No extra skills found.")
 
         st.markdown("## AI Suggestions")
         st.write(llm_output)
 
         st.markdown("## Runtime")
         st.write(f"{latency} sec")
+
+        with st.expander("View Resume Text"):
+            st.text(resume_text[:5000])
+
+        with st.expander("View Job Description"):
+            st.text(job_text[:5000])
