@@ -1,0 +1,8 @@
+streamlit
+pdfplumber
+python-docx
+spacy==3.7.2
+sentence-transformers
+scikit-learn
+transformers
+torch
