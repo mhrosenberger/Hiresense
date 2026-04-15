@@ -23,9 +23,6 @@ st.write(
 )
 
 
-# =========================================================
-# LOAD MODELS
-# =========================================================
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -114,9 +111,8 @@ def is_valid_skill(skill):
     bad_exact = {
         "resume", "job", "description", "candidate", "employee", "applicant",
         "skills", "experience", "projects", "education", "activities",
-        "company", "organization", "none", "n/a", "instructions",
-        "resume skills section", "resume projects and experience",
-        "job description", "job text", "answer", "output"
+        "company", "organization", "none", "n/a", "answer", "output",
+        "intern", "data analytics intern", "data analysis intern"
     }
     if skill in bad_exact:
         return False
@@ -127,15 +123,13 @@ def is_valid_skill(skill):
         "equal opportunity", "full time", "part time",
         "expected graduation", "gpa", "return only",
         "do not include", "do not explain", "comma-separated",
-        "skills section", "projects and experience"
+        "job description", "resume skills section",
+        "resume projects and experience"
     ]
     if any(bad in skill for bad in bad_contains):
         return False
 
     if re.search(r"\b(19|20)\d{2}\b", skill):
-        return False
-
-    if re.search(r"\b[a-z]\.\b", skill):
         return False
 
     return True
@@ -170,64 +164,20 @@ def dedupe_skills(skills):
 
 
 def parse_llm_list(output_text):
-    # Remove common echoed instruction lines if they appear
-    cleaned_output = output_text
-    bad_lines = [
-        "extract the applicant's real professional skills from this resume",
-        "extract the required or preferred skills from this job description",
-        "return only a comma-separated list",
-        "do not explain anything",
-        "resume skills section",
-        "resume projects and experience",
-        "job description",
-        "answer:"
-    ]
-    for line in bad_lines:
-        cleaned_output = cleaned_output.replace(line, "")
-
-    parts = re.split(r",|\n|;", cleaned_output)
+    parts = re.split(r",|\n|;", output_text)
     return dedupe_skills([p.strip() for p in parts if p.strip()])
 
 
 # =========================================================
 # LLM HELPER
 # =========================================================
-def run_llm(task, content, max_new_tokens=120):
-    """
-    task: one of ['resume_skills', 'job_skills', 'suggestions']
-    content: already-prepared text block
-    """
-    if task == "resume_skills":
-        instruction = (
-            "Extract the applicant's real professional skills. "
-            "Include tools, technologies, software, programming languages, platforms, methods, "
-            "certifications, and job-relevant technical skills. "
-            "Do not include names, schools, locations, GPA, dates, employers, or publication citations. "
-            "Return only a comma-separated list."
-        )
-    elif task == "job_skills":
-        instruction = (
-            "Extract the required or preferred skills for this job. "
-            "Include tools, technologies, software, programming languages, platforms, methods, "
-            "certifications, domain knowledge, and technical or professional skills. "
-            "Do not include company descriptions, benefits, locations, marketing text, or sentence fragments. "
-            "Return only a comma-separated list."
-        )
-    else:
-        instruction = (
-            "Compare the resume and the job description and provide three practical resume improvements, "
-            "two stronger bullet point rewrite ideas, and one short professional summary tailored to the job. "
-            "Do not invent fake experience. Be concise."
-        )
-
-    prompt = f"{instruction}\n\n{content}"
-
+def run_llm(prompt, max_new_tokens=120):
     try:
         inputs = tokenizer(
             prompt,
             return_tensors="pt",
             truncation=True,
-            max_length=1024
+            max_length=768
         )
 
         with torch.no_grad():
@@ -240,11 +190,6 @@ def run_llm(task, content, max_new_tokens=120):
             )
 
         decoded = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
-
-        # If the model echoes too much of the prompt, trim it aggressively
-        if decoded.lower().startswith(instruction[:30].lower()):
-            decoded = decoded[len(instruction):].strip()
-
         return decoded
     except Exception:
         return ""
@@ -287,7 +232,7 @@ def extract_job_relevant_section(job_text):
 
     for section_name in ["qualifications", "requirements", "experience", "responsibilities", "position summary"]:
         match = re.search(
-            rf"{section_name}\s*:(.*?)(benefits\s*:|compensation\s*:|education\s*:|work environment\s*:|$)",
+            rf"{section_name}\s*:(.*?)(benefits\s*:|compensation\s*:|education\s*:|work environment\s*:|co only\s*:|$)",
             text,
             flags=re.IGNORECASE | re.DOTALL
         )
@@ -297,7 +242,40 @@ def extract_job_relevant_section(job_text):
     if chunks:
         return "\n".join(chunks).strip()
 
-    return text[:2500]
+    return text[:2000]
+
+
+# =========================================================
+# FALLBACK PARSERS
+# =========================================================
+def parse_explicit_resume_skills(resume_text):
+    skills_section = extract_resume_skills_section(resume_text)
+    if not skills_section:
+        return []
+
+    raw = re.split(r",|\n|;|•", skills_section)
+    return dedupe_skills([x.strip() for x in raw if x.strip()])
+
+
+def parse_simple_job_terms(job_text):
+    relevant = extract_job_relevant_section(job_text)
+
+    patterns = [
+        r"\bpython\b", r"\br\b", r"\bsql\b", r"\bpower bi\b", r"\btableau\b",
+        r"\bhadoop\b", r"\bspark\b", r"\bmachine learning\b",
+        r"\bpredictive modeling\b", r"\bstatistics\b", r"\bstatistical analysis\b",
+        r"\bdata analytics\b", r"\bdata analysis\b", r"\bdata models?\b",
+        r"\banomaly detection\b", r"\bspc\b", r"\brma\b", r"\bmicrosoft office\b"
+    ]
+
+    found = []
+    lowered = relevant.lower()
+    for pattern in patterns:
+        matches = re.findall(pattern, lowered)
+        for m in matches:
+            found.append(m)
+
+    return dedupe_skills(found)
 
 
 # =========================================================
@@ -307,20 +285,60 @@ def ai_identify_resume_skills(resume_text):
     skills_section = extract_resume_skills_section(resume_text)
     exp_proj_section = extract_resume_project_experience_section(resume_text)
 
-    content = (
-        f"Resume Skills Section:\n{skills_section[:1200]}\n\n"
-        f"Resume Projects and Experience:\n{exp_proj_section[:1500]}"
-    )
+    explicit_skills = parse_explicit_resume_skills(resume_text)
 
-    output = run_llm("resume_skills", content, max_new_tokens=120)
-    return parse_llm_list(output)
+    # If there is a clear Skills section, trust it first and let AI add more.
+    prompt = f"""
+Extract real professional skills from this resume text.
+
+Only include:
+tools, software, programming languages, platforms, technical methods,
+certifications, and job-relevant professional skills.
+
+Do not include:
+names, schools, locations, dates, GPA, employers, or publication citations.
+
+Return only a comma-separated list.
+
+Skills Section:
+{skills_section[:1000]}
+
+Projects and Experience:
+{exp_proj_section[:1200]}
+"""
+
+    llm_output = run_llm(prompt, max_new_tokens=100)
+    llm_skills = parse_llm_list(llm_output)
+
+    combined = dedupe_skills(explicit_skills + llm_skills)
+    return combined
 
 
 def ai_identify_job_skills(job_text):
     relevant_job_text = extract_job_relevant_section(job_text)
-    content = f"Job Description:\n{relevant_job_text[:2200]}"
-    output = run_llm("job_skills", content, max_new_tokens=120)
-    return parse_llm_list(output)
+    fallback_terms = parse_simple_job_terms(job_text)
+
+    prompt = f"""
+Extract the required or preferred skills from this job text.
+
+Only include:
+tools, software, programming languages, platforms, methods,
+certifications, domain knowledge, and technical/professional skills.
+
+Do not include:
+company descriptions, benefits, locations, marketing phrases, or sentence fragments.
+
+Return only a comma-separated list.
+
+Job Text:
+{relevant_job_text[:1800]}
+"""
+
+    llm_output = run_llm(prompt, max_new_tokens=100)
+    llm_skills = parse_llm_list(llm_output)
+
+    combined = dedupe_skills(fallback_terms + llm_skills)
+    return combined
 
 
 # =========================================================
@@ -352,14 +370,31 @@ def compare_skills(resume_text, job_text):
 # SUGGESTIONS
 # =========================================================
 def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills):
-    content = (
-        f"Resume:\n{resume_text[:2200]}\n\n"
-        f"Job Description:\n{job_text[:2200]}\n\n"
-        f"Matched Skills:\n{', '.join(matched_skills)}\n\n"
-        f"Missing Skills:\n{', '.join(missing_skills)}"
-    )
+    prompt = f"""
+Compare this resume to this job description.
 
-    output = run_llm("suggestions", content, max_new_tokens=180)
+Resume:
+{resume_text[:1800]}
+
+Job Description:
+{job_text[:1800]}
+
+Matched Skills:
+{", ".join(matched_skills)}
+
+Missing Skills:
+{", ".join(missing_skills)}
+
+Write:
+1. Three practical improvements
+2. Two stronger bullet point rewrite ideas
+3. One short professional summary tailored to the job
+
+Do not invent fake experience.
+Keep it concise.
+"""
+
+    output = run_llm(prompt, max_new_tokens=180)
     if output.strip():
         return output
     return "AI suggestions are unavailable right now."
