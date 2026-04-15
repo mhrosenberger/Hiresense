@@ -18,13 +18,10 @@ st.subheader("AI Resume & Job Description Matching Web Application")
 
 st.write(
     "Upload a resume and paste a job description to receive an overall match score, "
-    "AI-extracted skills, and AI-generated improvement suggestions."
+    "AI-identified skills, and AI-generated improvement suggestions."
 )
 
 
-# =========================================================
-# LOAD MODELS
-# =========================================================
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -92,7 +89,7 @@ def clean_text(text):
     return text.strip()
 
 
-def normalize_skill_text(skill):
+def normalize_skill(skill):
     skill = skill.lower().strip()
     skill = re.sub(r"^[\-\*\•\d\.\)\(]+", "", skill)
     skill = re.sub(r"[^a-zA-Z0-9\+\#\.\-/& ]", "", skill)
@@ -111,9 +108,9 @@ def is_valid_skill(skill):
         return False
 
     bad_exact = {
-        "none", "n/a", "na", "resume", "job", "description", "candidate",
-        "employee", "applicant", "role", "position", "company", "organization",
-        "skills", "experience", "projects", "education", "activities"
+        "resume", "job", "description", "candidate", "employee", "applicant",
+        "skills", "experience", "projects", "education", "activities",
+        "company", "organization", "none", "n/a"
     }
 
     if skill in bad_exact:
@@ -123,14 +120,13 @@ def is_valid_skill(skill):
         "@", "http", "www", ".com", ".org", ".edu",
         "benefits", "salary", "compensation", "location",
         "equal opportunity", "full time", "part time",
-        "expected graduation", "gpa", "worcester", "fort worth",
-        "texas", "india", "atlanta", "colorado", "denver"
+        "expected graduation", "gpa"
     ]
 
     if any(bad in skill for bad in bad_contains):
         return False
 
-    # likely names / citations / dates
+    # remove obvious dates / citation fragments
     if re.search(r"\b(19|20)\d{2}\b", skill):
         return False
 
@@ -144,18 +140,18 @@ def dedupe_skills(skills):
     cleaned = []
     seen = set()
 
+    replacements = {
+        "microsoft office suite": "microsoft office",
+        "basic rstudio": "rstudio",
+        "basic matlab": "matlab",
+    }
+
     for skill in skills:
-        s = normalize_skill_text(skill)
+        s = normalize_skill(skill)
+        s = replacements.get(s, s)
+
         if not is_valid_skill(s):
             continue
-
-        # singular cleanup for a few common cases
-        replacements = {
-            "microsoft office suite": "microsoft office",
-            "basic rstudio": "rstudio",
-            "basic matlab": "matlab",
-        }
-        s = replacements.get(s, s)
 
         if s not in seen:
             seen.add(s)
@@ -164,21 +160,17 @@ def dedupe_skills(skills):
     return sorted(cleaned)
 
 
-# =========================================================
-# LLM HELPERS
-# =========================================================
-def run_llm(prompt, max_length=180):
+def parse_llm_list(output_text):
+    parts = re.split(r",|\n|;", output_text)
+    return dedupe_skills([p.strip() for p in parts if p.strip()])
+
+
+def run_llm(prompt, max_length=220):
     try:
         result = generator(prompt, max_length=max_length, do_sample=False)
         return result[0]["generated_text"]
     except Exception:
         return ""
-
-
-def parse_llm_list(output_text):
-    raw_parts = re.split(r",|\n|;", output_text)
-    skills = [part.strip() for part in raw_parts if part.strip()]
-    return dedupe_skills(skills)
 
 
 # =========================================================
@@ -196,9 +188,9 @@ def extract_resume_skills_section(resume_text):
     return ""
 
 
-def extract_resume_experience_projects(resume_text):
+def extract_resume_project_experience_section(resume_text):
     text = clean_text(resume_text)
-    sections = []
+    chunks = []
 
     for section_name in ["experience", "projects"]:
         match = re.search(
@@ -207,14 +199,14 @@ def extract_resume_experience_projects(resume_text):
             flags=re.IGNORECASE | re.DOTALL
         )
         if match:
-            sections.append(match.group(1).strip())
+            chunks.append(match.group(1).strip())
 
-    return "\n".join(sections).strip()
+    return "\n".join(chunks).strip()
 
 
 def extract_job_relevant_section(job_text):
     text = clean_text(job_text)
-    matches = []
+    chunks = []
 
     for section_name in ["qualifications", "requirements", "experience", "responsibilities", "position summary"]:
         match = re.search(
@@ -223,35 +215,31 @@ def extract_job_relevant_section(job_text):
             flags=re.IGNORECASE | re.DOTALL
         )
         if match:
-            matches.append(match.group(1).strip())
+            chunks.append(match.group(1).strip())
 
-    if matches:
-        return "\n".join(matches).strip()
+    if chunks:
+        return "\n".join(chunks).strip()
 
     return text[:2500]
 
 
 # =========================================================
-# AI SKILL EXTRACTION
+# AI SKILL IDENTIFICATION
 # =========================================================
-def ai_extract_resume_skills(resume_text):
+def ai_identify_resume_skills(resume_text):
     skills_section = extract_resume_skills_section(resume_text)
-    exp_proj_section = extract_resume_experience_projects(resume_text)
+    exp_proj_section = extract_resume_project_experience_section(resume_text)
 
     prompt = f"""
-You are extracting resume skills.
+Identify the applicant's real skills from this resume.
 
-Task:
-Extract only the applicant's real professional skills from the resume.
-
-Priority:
-1. First use the explicit "Skills" section if it exists.
-2. Then include real tools, software, methods, programming languages, certifications,
-   and technical/domain skills shown in projects or experience.
-3. Do NOT include names, schools, locations, GPA, dates, publications, employers, or generic words.
-
-Allowed examples:
-Python, SQL, Tableau, Android Studio, Simio, Excel, data visualization, simulation, machine learning
+Instructions:
+- First prioritize the explicit Skills section.
+- Then identify additional skills shown in projects and experience.
+- Include tools, software, programming languages, platforms, methods, certifications,
+  and job-relevant professional skills.
+- Do NOT include names, schools, locations, GPA, dates, employers, publication citations,
+  or generic filler words.
 
 Return only a comma-separated list.
 Do not explain anything.
@@ -259,31 +247,37 @@ Do not explain anything.
 Resume Skills Section:
 {skills_section[:1200]}
 
-Resume Experience and Projects:
+Resume Projects and Experience:
 {exp_proj_section[:1500]}
 """
 
-    output = run_llm(prompt, max_length=200)
+    output = run_llm(prompt, max_length=220)
     return parse_llm_list(output)
 
 
-def ai_extract_job_skills(job_text):
+def ai_identify_job_skills(job_text):
     relevant_job_text = extract_job_relevant_section(job_text)
 
     prompt = f"""
-You are extracting job requirements.
+Identify the skills required or preferred for this job.
 
-Task:
-Extract only the skills, tools, software, methods, certifications, domain knowledge,
-and technical/professional competencies required or preferred for this job.
+Include:
+- tools
+- software
+- programming languages
+- platforms
+- methods
+- certifications
+- domain knowledge
+- technical and professional skills
 
 Do NOT include:
 - company descriptions
 - benefits
 - locations
-- marketing phrases
-- general filler language
+- marketing text
 - sentence fragments
+- generic filler language
 
 Return only a comma-separated list.
 Do not explain anything.
@@ -292,7 +286,7 @@ Job Text:
 {relevant_job_text[:2200]}
 """
 
-    output = run_llm(prompt, max_length=200)
+    output = run_llm(prompt, max_length=220)
     return parse_llm_list(output)
 
 
@@ -307,8 +301,8 @@ def compute_match_score(resume_text, job_text):
 
 
 def compare_skills(resume_text, job_text):
-    resume_skills = set(ai_extract_resume_skills(resume_text))
-    job_skills = set(ai_extract_job_skills(job_text))
+    resume_skills = set(ai_identify_resume_skills(resume_text))
+    job_skills = set(ai_identify_job_skills(job_text))
 
     matched = sorted(job_skills.intersection(resume_skills))
     missing = sorted(job_skills - resume_skills)
@@ -322,7 +316,7 @@ def compare_skills(resume_text, job_text):
 
 
 # =========================================================
-# LLM SUGGESTIONS
+# SUGGESTIONS
 # =========================================================
 def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills):
     prompt = f"""
@@ -423,10 +417,10 @@ if analyze:
             st.metric("Matched Skills", len(matched))
             st.metric("Missing Skills", len(missing))
 
-        st.markdown("## Skills Extracted from Job Description")
+        st.markdown("## Skills Identified in Job Description")
         st.write(", ".join(sorted(job_skills)) if job_skills else "No skills found.")
 
-        st.markdown("## Skills Extracted from Resume")
+        st.markdown("## Skills Identified in Resume")
         st.write(", ".join(sorted(resume_skills)) if resume_skills else "No skills found.")
 
         st.markdown("## Matched Skills")
