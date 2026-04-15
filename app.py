@@ -23,6 +23,9 @@ st.write(
 )
 
 
+# =========================================================
+# LOAD MODELS
+# =========================================================
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -144,6 +147,9 @@ def dedupe_skills(skills):
         "spark is a plus": "spark",
         "proficiency in python": "python",
         "power bi or similar": "power bi",
+        "data models": "data modeling",
+        "data analytics": "data analysis",
+        "statistical analysis": "statistics",
     }
 
     cleaned = []
@@ -185,8 +191,9 @@ def run_llm(prompt, max_new_tokens=120):
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                num_beams=4,
-                early_stopping=True
+                num_beams=5,
+                early_stopping=True,
+                no_repeat_ngram_size=2
             )
 
         decoded = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
@@ -287,7 +294,6 @@ def ai_identify_resume_skills(resume_text):
 
     explicit_skills = parse_explicit_resume_skills(resume_text)
 
-    # If there is a clear Skills section, trust it first and let AI add more.
     prompt = f"""
 Extract real professional skills from this resume text.
 
@@ -296,7 +302,7 @@ tools, software, programming languages, platforms, technical methods,
 certifications, and job-relevant professional skills.
 
 Do not include:
-names, schools, locations, dates, GPA, employers, or publication citations.
+names, schools, locations, GPA, dates, employers, or publication citations.
 
 Return only a comma-separated list.
 
@@ -371,13 +377,11 @@ def compare_skills(resume_text, job_text):
 # =========================================================
 def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills):
     prompt = f"""
-Compare this resume to this job description.
-
 Resume:
-{resume_text[:1800]}
+{resume_text[:1500]}
 
 Job Description:
-{job_text[:1800]}
+{job_text[:1500]}
 
 Matched Skills:
 {", ".join(matched_skills)}
@@ -385,19 +389,28 @@ Matched Skills:
 Missing Skills:
 {", ".join(missing_skills)}
 
-Write:
-1. Three practical improvements
-2. Two stronger bullet point rewrite ideas
-3. One short professional summary tailored to the job
+Task:
+Write exactly 3 resume improvement suggestions, 2 bullet rewrite ideas, and 1 short professional summary.
 
-Do not invent fake experience.
-Keep it concise.
+Format:
+Improvements:
+1.
+2.
+3.
+
+Bullet Rewrites:
+1.
+2.
+
+Summary:
 """
 
-    output = run_llm(prompt, max_new_tokens=180)
-    if output.strip():
-        return output
-    return "AI suggestions are unavailable right now."
+    output = run_llm(prompt, max_new_tokens=220)
+
+    if not output.strip():
+        return "AI suggestions are unavailable right now."
+
+    return output
 
 
 # =========================================================
