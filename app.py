@@ -1,12 +1,10 @@
 import re
 import time
-from collections import Counter
 
 import docx
 import pdfplumber
 import spacy
 import streamlit as st
-import torch
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
@@ -35,12 +33,7 @@ st.write(
 
 @st.cache_resource
 def load_spacy():
-    try:
-        return spacy.load("en_core_web_sm")
-    except OSError:
-        from spacy import cli
-        cli.download("en_core_web_sm")
-        return spacy.load("en_core_web_sm")
+    return spacy.load("en_core_web_sm")
 
 @st.cache_resource
 def load_embedding_model():
