@@ -1,9 +1,7 @@
 import re
 import time
-
 import docx
 import pdfplumber
-import spacy
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -31,9 +29,6 @@ st.write(
     "missing skills, and AI-generated recommendations."
 )
 
-@st.cache_resource
-def load_spacy():
-    return spacy.load("en_core_web_sm")
 
 @st.cache_resource
 def load_embedding_model():
@@ -43,7 +38,7 @@ def load_embedding_model():
 def load_generator():
     return pipeline("text2text-generation", model=LLM_MODEL_NAME)
 
-nlp = load_spacy()
+
 embed_model = load_embedding_model()
 generator = load_generator()
 
