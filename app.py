@@ -23,34 +23,43 @@ st.write(
 # Text Extraction Helpers
 # -----------------------------
 def get_relevant_job_lines(job_text):
-    text = job_text.lower()
-
     lines = [line.strip() for line in job_text.split("\n") if line.strip()]
 
     relevant_lines = []
 
+    # ONLY real section headers (more strict)
     allowed_sections = [
         "qualifications",
         "requirements",
-        "experience",
+        "required qualifications",
+        "preferred qualifications",
+        "technical skills",
         "skills"
     ]
 
-    current_section = None
+    stop_sections = [
+        "benefits",
+        "compensation",
+        "about",
+        "environment",
+        "position summary",
+        "responsibilities"
+    ]
+
+    current_section = False
 
     for line in lines:
-        lower_line = line.lower()
+        lower_line = line.lower().strip()
 
-        # detect section headers
-        if any(section in lower_line for section in allowed_sections):
-            current_section = lower_line
+        # detect section headers EXACTLY (not partial match)
+        if any(lower_line.startswith(section) for section in allowed_sections):
+            current_section = True
             continue
 
-        # stop when hitting unrelated sections
-        if any(stop in lower_line for stop in [
-            "benefits", "compensation", "about", "environment"
-        ]):
-            current_section = None
+        # stop section
+        if any(lower_line.startswith(section) for section in stop_sections):
+            current_section = False
+            continue
 
         if current_section:
             relevant_lines.append(line)
