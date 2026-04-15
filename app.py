@@ -131,49 +131,54 @@ def is_valid_skill(skill):
 # =========================================================
 def ai_extract_skills(text):
     prompt = f"""
-Extract only job-relevant skills from the text below.
+Extract only SKILLS from the text.
 
-Include:
-- technical skills
-- software
+Skills include:
 - tools
-- platforms
+- technologies
+- methods
+- software
 - programming languages
-- certifications
-- domain-specific skills
-- industry methods
-- relevant professional competencies
+- technical processes
 
-Do NOT include:
-- company names
-- locations
-- dates
-- benefits
-- salary information
-- personal names
-- generic filler words
-
-Return only a comma-separated list with no explanation.
+Return ONLY comma-separated items.
+No sentences. No explanations.
 
 Text:
-{text[:2500]}
+{text[:2000]}
 """
 
     try:
-        result = generator(prompt, max_length=180, do_sample=False)
+        result = generator(prompt, max_length=150, do_sample=False)
         output = result[0]["generated_text"]
 
-        raw_skills = [s.strip() for s in output.split(",") if s.strip()]
-        cleaned_skills = []
+        raw = [s.strip().lower() for s in output.split(",") if s.strip()]
 
-        for skill in raw_skills:
-            skill = normalize_skill_text(skill)
-            if is_valid_skill(skill):
-                cleaned_skills.append(skill)
+        cleaned = []
 
-        return sorted(list(set(cleaned_skills)))
+        for skill in raw:
+            # remove punctuation
+            skill = re.sub(r"[^a-zA-Z0-9\+\#\.\-/ ]", "", skill).strip()
 
-    except Exception:
+            # ❌ REMOVE BAD SKILLS
+            if (
+                len(skill.split()) > 3  # too long = sentence
+                or any(x in skill for x in [
+                    "company", "global", "team", "working",
+                    "building", "together", "future",
+                    "customer", "employees", "environment"
+                ])
+                or re.search(r"\b(inc|llc|corp|ltd)\b", skill)
+                or re.search(r"\b\d{4}\b", skill)  # years
+                or skill in ["clean", "collect", "production"]
+            ):
+                continue
+
+            cleaned.append(skill)
+
+        return sorted(list(set(cleaned)))
+
+    except:
         return []
 
 
