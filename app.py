@@ -11,10 +11,6 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
 
-
-# =========================================================
-# CONFIG
-# =========================================================
 LLM_MODEL_NAME = "google/flan-t5-base"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
@@ -27,10 +23,6 @@ KNOWN_SKILLS = [
     "correlation studies", "data modeling", "microsoft office", "office 365"
 ]
 
-
-# =========================================================
-# STREAMLIT PAGE
-# =========================================================
 st.set_page_config(page_title="HireSense", layout="wide")
 
 st.title("HireSense")
@@ -41,34 +33,26 @@ st.write(
     "missing skills, and AI-generated recommendations."
 )
 
-
-# =========================================================
-# LOAD MODELS
-# =========================================================
 @st.cache_resource
 def load_spacy():
     try:
         return spacy.load("en_core_web_sm")
     except OSError:
-        import spacy.cli
-        spacy.cli.download("en_core_web_sm")
+        from spacy import cli
+        cli.download("en_core_web_sm")
         return spacy.load("en_core_web_sm")
-
 
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-
 @st.cache_resource
 def load_generator():
     return pipeline("text2text-generation", model=LLM_MODEL_NAME)
 
-
 nlp = load_spacy()
 embed_model = load_embedding_model()
 generator = load_generator()
-
 
 # =========================================================
 # FILE READING
