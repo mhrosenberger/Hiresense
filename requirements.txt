@@ -1,8 +1,8 @@
 streamlit
 pdfplumber
 python-docx
-spacy==3.7.2
+spacy
 sentence-transformers
 scikit-learn
-transformers
 torch
+sentencepiece
