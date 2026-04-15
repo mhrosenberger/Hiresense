@@ -1,70 +1,83 @@
 import re
 import time
+from collections import Counter
 
 import docx
 import pdfplumber
+import spacy
 import streamlit as st
+import torch
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from transformers import pipeline
 
 
-# -----------------------------
-# Page Config
-# -----------------------------
+# =========================================================
+# CONFIG
+# =========================================================
+# For local GPU / stronger machine, use:
+# LLM_MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
+#
+# For Streamlit Cloud / lighter deployment, use:
+LLM_MODEL_NAME = "google/flan-t5-base"
+
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
+# Small dictionary for structured skill comparison
+KNOWN_SKILLS = [
+    "python", "r", "sql", "excel", "tableau", "power bi",
+    "machine learning", "deep learning", "data analysis", "data analytics",
+    "data science", "predictive modeling", "statistics", "statistical analysis",
+    "database management", "spacy", "pytorch", "transformers",
+    "big data", "hadoop", "spark", "anomaly detection",
+    "correlation studies", "data modeling", "microsoft office", "office 365"
+]
+
+
+# =========================================================
+# STREAMLIT PAGE
+# =========================================================
 st.set_page_config(page_title="HireSense", layout="wide")
 
 st.title("HireSense")
-st.subheader("AI Resume & Job Description Skill Matcher")
+st.subheader("AI Resume & Job Description Matching Web Application")
 
 st.write(
-    "Upload your resume and paste a job description to extract skill phrases "
-    "from both documents and compare them."
+    "Upload your resume and paste a job description to receive a match score, "
+    "missing skills, extracted keywords, and AI-generated recommendations."
 )
 
-# -----------------------------
-# Text Extraction Helpers
-# -----------------------------
-def get_relevant_job_lines(job_text):
-    lines = [line.strip() for line in job_text.split("\n") if line.strip()]
 
-    relevant_lines = []
+# =========================================================
+# MODEL LOADING
+# =========================================================
+@st.cache_resource
+def load_spacy():
+    return spacy.load("en_core_web_sm")
 
-    # ONLY real section headers (more strict)
-    allowed_sections = [
-        "qualifications",
-        "requirements",
-        "required qualifications",
-        "preferred qualifications",
-        "technical skills",
-        "skills"
-    ]
 
-    stop_sections = [
-        "benefits",
-        "compensation",
-        "about",
-        "environment",
-        "position summary",
-        "responsibilities"
-    ]
+@st.cache_resource
+def load_embedding_model():
+    return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-    current_section = False
 
-    for line in lines:
-        lower_line = line.lower().strip()
+@st.cache_resource
+def load_generator():
+    return pipeline(
+        "text2text-generation",
+        model=LLM_MODEL_NAME,
+        device_map="auto" if torch.cuda.is_available() else None
+    )
 
-        # detect section headers EXACTLY (not partial match)
-        if any(lower_line.startswith(section) for section in allowed_sections):
-            current_section = True
-            continue
 
-        # stop section
-        if any(lower_line.startswith(section) for section in stop_sections):
-            current_section = False
-            continue
+nlp = load_spacy()
+embed_model = load_embedding_model()
+generator = load_generator()
 
-        if current_section:
-            relevant_lines.append(line)
 
-    return relevant_lines
+# =========================================================
+# FILE READING
+# =========================================================
 def extract_text_from_pdf(uploaded_file):
     text = ""
     with pdfplumber.open(uploaded_file) as pdf:
@@ -84,7 +97,7 @@ def extract_text_from_txt(uploaded_file):
     return uploaded_file.read().decode("utf-8", errors="ignore")
 
 
-def extract_resume_text(uploaded_file):
+def extract_uploaded_text(uploaded_file):
     if uploaded_file is None:
         return ""
 
@@ -104,137 +117,86 @@ def extract_resume_text(uploaded_file):
         return ""
 
 
-# -----------------------------
-# Cleaning
-# -----------------------------
+# =========================================================
+# PREPROCESSING
+# =========================================================
 def clean_text(text):
-    text = text.lower()
+    text = text.replace("\r", "\n")
     text = text.replace("\t", " ")
-    text = re.sub(r"[•▪◦]", "\n", text)
+    text = re.sub(r"[•▪◦]", "•", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
-def normalize_skill(skill):
-    skill = skill.lower().strip()
-    skill = re.sub(r"^[\-\•\*\d\.\)\(]+", "", skill)
-    skill = re.sub(r"[^a-zA-Z0-9\+\#\/\-\.\s]", "", skill)
-    skill = re.sub(r"\s+", " ", skill).strip()
-
-    stop_phrases = {
-        "", "and", "or", "with", "of", "in", "to", "for", "the", "a", "an",
-        "preferred", "required", "plus", "etc", "including"
-    }
-
-    if skill in stop_phrases:
-        return ""
-
-    if len(skill) < 2:
-        return ""
-
-    return skill
+def normalize_phrase(text):
+    text = text.lower().strip()
+    text = re.sub(r"^[\-\•\*\d\.\)\(]+", "", text)
+    text = re.sub(r"[^a-zA-Z0-9\+\#\/\-\.\s]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
-# -----------------------------
-# Dynamic Skill Extraction
-# -----------------------------
-def split_skill_candidates(text):
-    pieces = []
+# =========================================================
+# SPACY-BASED EXTRACTION
+# =========================================================
+def extract_keywords_spacy(text, top_n=25):
+    doc = nlp(text)
+    keywords = []
 
-    # split by lines first
-    lines = text.split("\n")
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        # split on commas / semicolons
-        comma_parts = re.split(r"[,;]", line)
-        for part in comma_parts:
-            part = part.strip()
-            if not part:
-                continue
-
-            # split on slash only if it looks like grouped skills
-            slash_parts = re.split(r"\s*/\s*", part)
-            for s in slash_parts:
-                s = s.strip()
-                if s:
-                    pieces.append(s)
-
-    return pieces
-
-
-def extract_skills_from_text(text):
-    original_text = text
-    text = text.lower()
-
-    skills = set()
-
-    # patterns that often introduce skills
-    patterns = [
-        r"(?:skills|requirements|qualifications|experience with|proficient in|proficiency in|knowledge of|familiarity with|expertise in|tools|technologies|stack)\s*:\s*([^\n]+)",
-        r"(?:experience with|proficient in|knowledge of|familiarity with|expertise in)\s+([^\.;\n]+)",
-    ]
-
-    for pattern in patterns:
-        matches = re.findall(pattern, original_text, flags=re.IGNORECASE)
-        for match in matches:
-            for piece in split_skill_candidates(match):
-                cleaned = normalize_skill(piece)
-                if cleaned:
-                    skills.add(cleaned)
-
-    # extract from bullet-like or list-like lines
-    for line in original_text.split("\n"):
-        line_clean = line.strip()
-        if not line_clean:
-            continue
-
-        # likely skill lines
+    for token in doc:
         if (
-            "," in line_clean
-            or "/" in line_clean
-            or line_clean.startswith("-")
-            or line_clean.startswith("•")
-            or line_clean.startswith("*")
+            not token.is_stop
+            and not token.is_punct
+            and not token.is_space
+            and len(token.text.strip()) > 2
+            and token.pos_ in ["NOUN", "PROPN", "ADJ"]
         ):
-            for piece in split_skill_candidates(line_clean):
-                cleaned = normalize_skill(piece)
-                if cleaned:
-                    # keep short phrase-sized items
-                    if len(cleaned.split()) <= 4:
-                        skills.add(cleaned)
+            keywords.append(token.lemma_.lower())
 
-    # extract capitalized / technical token patterns directly from text
-    tech_patterns = [
-        r"\b[a-zA-Z]+\+\+\b",
-        r"\bc#\b",
-        r"\b[a-zA-Z]+\.[a-zA-Z]+\b",
-        r"\b(?:aws|azure|gcp|sql|python|java|javascript|typescript|react|node\.js|pytorch|tensorflow|tableau|excel|power bi|docker|kubernetes|linux|git)\b",
-    ]
-
-    lowered = original_text.lower()
-    for pattern in tech_patterns:
-        matches = re.findall(pattern, lowered, flags=re.IGNORECASE)
-        for match in matches:
-            cleaned = normalize_skill(match)
-            if cleaned:
-                skills.add(cleaned)
-
-    # remove phrases that are too long to be skills
-    final_skills = set()
-    for skill in skills:
-        word_count = len(skill.split())
-        if 1 <= word_count <= 4:
-            final_skills.add(skill)
-
-    return sorted(final_skills)
+    freq = Counter(keywords)
+    return [word for word, _ in freq.most_common(top_n)]
 
 
+def extract_entities_spacy(text):
+    doc = nlp(text)
+    entities = set()
+
+    for ent in doc.ents:
+        cleaned = normalize_phrase(ent.text)
+        if cleaned and len(cleaned.split()) <= 4:
+            entities.add(cleaned)
+
+    return sorted(entities)
+
+
+def extract_known_skills(text):
+    lower_text = text.lower()
+    found = []
+
+    for skill in KNOWN_SKILLS:
+        pattern = r"\b" + re.escape(skill.lower()) + r"\b"
+        if re.search(pattern, lower_text):
+            found.append(skill)
+
+    return sorted(list(set(found)))
+
+
+# =========================================================
+# EMBEDDING MATCH SCORE
+# =========================================================
+def compute_match_score(resume_text, job_text):
+    resume_emb = embed_model.encode([resume_text])
+    job_emb = embed_model.encode([job_text])
+    score = cosine_similarity(resume_emb, job_emb)[0][0]
+    return round(float(score) * 100, 2)
+
+
+# =========================================================
+# SKILL COMPARISON
+# =========================================================
 def compare_skills(resume_text, job_text):
-    resume_skills = set(extract_skills_from_text(resume_text))
-    job_skills = set(extract_skills_from_text(job_text))
+    resume_skills = set(extract_known_skills(resume_text))
+    job_skills = set(extract_known_skills(job_text))
 
     matched_skills = sorted(job_skills.intersection(resume_skills))
     missing_skills = sorted(job_skills - resume_skills)
@@ -254,30 +216,58 @@ def compare_skills(resume_text, job_text):
     }
 
 
-# -----------------------------
-# Suggestions
-# -----------------------------
-def generate_skill_suggestions(missing_skills):
-    suggestions = []
-
-    if missing_skills:
-        suggestions.append(
-            "Add these job-required skills only if you genuinely have experience with them: "
-            + ", ".join(missing_skills[:10]) + "."
-        )
-        suggestions.append(
-            "Use the same wording from the job description when describing relevant experience."
-        )
-        suggestions.append(
-            "Add missing skills into your summary, projects, and bullet points where appropriate."
-        )
-    else:
-        suggestions.append("Your resume appears to cover the extracted job skills well.")
-        suggestions.append("Focus on improving bullet points with stronger outcomes and metrics.")
-
-    return suggestions
+def find_missing_keywords(resume_text, job_text):
+    resume_keywords = set(extract_keywords_spacy(resume_text, 40))
+    job_keywords = set(extract_keywords_spacy(job_text, 40))
+    missing = sorted(list(job_keywords - resume_keywords))
+    return missing[:20]
 
 
+# =========================================================
+# LLM-BASED SUGGESTIONS
+# =========================================================
+def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills, missing_keywords):
+    prompt = f"""
+You are a resume assistant.
+
+Compare the resume and job description below.
+
+Resume:
+{resume_text[:2500]}
+
+Job Description:
+{job_text[:2500]}
+
+Matched Skills:
+{", ".join(matched_skills)}
+
+Missing Skills:
+{", ".join(missing_skills)}
+
+Missing Keywords:
+{", ".join(missing_keywords)}
+
+Please provide:
+1. Three specific resume improvement suggestions
+2. Two bullet point rewrite ideas
+3. A short professional summary tailored to the job
+
+Keep the response concise, practical, and grounded in the provided texts.
+"""
+
+    try:
+        result = generator(prompt, max_length=300, do_sample=False)
+        if result and len(result) > 0:
+            return result[0]["generated_text"]
+    except Exception as e:
+        return f"LLM generation failed: {e}"
+
+    return "No AI suggestions available."
+
+
+# =========================================================
+# SIMPLE RULE-BASED BULLET SUPPORT
+# =========================================================
 def simple_bullet_rewrites(resume_text, missing_skills):
     lines = [line.strip() for line in resume_text.split("\n") if line.strip()]
     bullets = [line for line in lines if line.startswith("-") or line.startswith("•")]
@@ -297,24 +287,25 @@ def simple_bullet_rewrites(resume_text, missing_skills):
 
     if not rewrites:
         rewrites.append(
-            "Add bullet points that begin with action verbs and include tools, results, or measurable outcomes."
+            "Add bullet points that start with action verbs and include results, tools, or measurable outcomes."
         )
 
     return rewrites
 
 
-# -----------------------------
-# Sidebar
-# -----------------------------
+# =========================================================
+# SIDEBAR
+# =========================================================
 st.sidebar.header("Instructions")
 st.sidebar.write("1. Upload your resume as PDF, DOCX, or TXT.")
-st.sidebar.write("2. Paste the job description.")
+st.sidebar.write("2. Paste the target job description.")
 st.sidebar.write("3. Click Analyze.")
-st.sidebar.write("4. Review extracted skills and compare them.")
+st.sidebar.write("4. Review the score, missing skills, and AI suggestions.")
 
-# -----------------------------
-# Main Inputs
-# -----------------------------
+
+# =========================================================
+# INPUTS
+# =========================================================
 uploaded_resume = st.file_uploader(
     "Upload Resume",
     type=["pdf", "docx", "txt"]
@@ -326,66 +317,98 @@ job_description = st.text_area(
     placeholder="Paste the full job description here..."
 )
 
-analyze_button = st.button("Analyze Skills Match")
+analyze_button = st.button("Analyze Resume Match")
 
-# -----------------------------
-# Main Logic
-# -----------------------------
+
+# =========================================================
+# MAIN APP
+# =========================================================
 if analyze_button:
     if uploaded_resume is None:
         st.warning("Please upload a resume.")
     elif not job_description.strip():
         st.warning("Please paste a job description.")
     else:
-        with st.spinner("Analyzing skills..."):
+        with st.spinner("Analyzing..."):
             start_time = time.time()
 
-            resume_text = extract_resume_text(uploaded_resume)
+            resume_text = extract_uploaded_text(uploaded_resume)
             if not resume_text.strip():
                 st.error("Could not extract text from the uploaded resume.")
                 st.stop()
 
-            results = compare_skills(resume_text, job_description)
-            suggestions = generate_skill_suggestions(results["missing_skills"])
-            bullet_rewrites = simple_bullet_rewrites(resume_text, results["missing_skills"])
+            clean_resume = clean_text(resume_text)
+            clean_job = clean_text(job_description)
+
+            match_score = compute_match_score(clean_resume, clean_job)
+
+            skill_results = compare_skills(clean_resume, clean_job)
+            missing_keywords = find_missing_keywords(clean_resume, clean_job)
+            resume_entities = extract_entities_spacy(clean_resume)
+            job_entities = extract_entities_spacy(clean_job)
+
+            llm_output = generate_llm_suggestions(
+                clean_resume,
+                clean_job,
+                skill_results["matched_skills"],
+                skill_results["missing_skills"],
+                missing_keywords
+            )
+
+            bullet_rewrites = simple_bullet_rewrites(
+                resume_text,
+                skill_results["missing_skills"]
+            )
 
             end_time = time.time()
             latency = round(end_time - start_time, 2)
 
-        st.success("Skill analysis complete.")
+        st.success("Analysis complete.")
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.metric("Skill Match %", f'{results["skill_match_percent"]}%')
+            st.metric("Overall Match Score", f"{match_score}%")
             st.metric("Inference Time", f"{latency} sec")
 
         with col2:
-            st.metric("Matched Skills", len(results["matched_skills"]))
-            st.metric("Missing Skills", len(results["missing_skills"]))
+            st.metric("Skill Match %", f'{skill_results["skill_match_percent"]}%')
+            st.metric("Matched Skills", len(skill_results["matched_skills"]))
 
-        st.markdown("## Skills Extracted from Job Description")
-        st.write(", ".join(results["job_skills"]) if results["job_skills"] else "No job skills found.")
+        with col3:
+            st.metric("Missing Skills", len(skill_results["missing_skills"]))
+            st.metric("Missing Keywords", len(missing_keywords))
 
-        st.markdown("## Skills Extracted from Resume")
-        st.write(", ".join(results["resume_skills"]) if results["resume_skills"] else "No resume skills found.")
+        st.markdown("## Skills Found in Job Description")
+        st.write(", ".join(skill_results["job_skills"]) if skill_results["job_skills"] else "No known job skills found.")
+
+        st.markdown("## Skills Found in Resume")
+        st.write(", ".join(skill_results["resume_skills"]) if skill_results["resume_skills"] else "No known resume skills found.")
 
         st.markdown("## Matched Skills")
-        st.write(", ".join(results["matched_skills"]) if results["matched_skills"] else "No matched skills found.")
+        st.write(", ".join(skill_results["matched_skills"]) if skill_results["matched_skills"] else "No matched skills found.")
 
         st.markdown("## Missing Skills")
-        st.write(", ".join(results["missing_skills"]) if results["missing_skills"] else "No missing skills found.")
+        st.write(", ".join(skill_results["missing_skills"]) if skill_results["missing_skills"] else "No missing skills found.")
 
         st.markdown("## Extra Skills on Resume")
-        st.write(", ".join(results["extra_resume_skills"]) if results["extra_resume_skills"] else "No extra resume skills found.")
+        st.write(", ".join(skill_results["extra_resume_skills"]) if skill_results["extra_resume_skills"] else "No extra resume skills found.")
 
-        st.markdown("## Suggestions")
-        for suggestion in suggestions:
-            st.write(f"- {suggestion}")
+        st.markdown("## Missing Keywords")
+        st.write(", ".join(missing_keywords) if missing_keywords else "No major missing keywords found.")
+
+        st.markdown("## spaCy Entities from Job Description")
+        st.write(", ".join(job_entities[:30]) if job_entities else "No entities found.")
+
+        st.markdown("## spaCy Entities from Resume")
+        st.write(", ".join(resume_entities[:30]) if resume_entities else "No entities found.")
 
         st.markdown("## Bullet Point Rewrite Ideas")
         for rewrite in bullet_rewrites:
             st.write(f"- {rewrite}")
+
+        st.markdown("## AI-Generated Recommendations")
+        st.write(llm_output)
 
         with st.expander("View Extracted Resume Text"):
             st.text(resume_text[:5000])
