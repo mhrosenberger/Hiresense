@@ -22,6 +22,9 @@ st.write(
 )
 
 
+# =========================================================
+# LOAD MODELS
+# =========================================================
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -84,7 +87,8 @@ def clean_text(text):
     text = text.replace("\r", "\n")
     text = text.replace("\t", " ")
     text = re.sub(r"[•▪◦]", "•", text)
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\n+", "\n", text)
+    text = re.sub(r"[ ]+", " ", text)
     return text.strip()
 
 
@@ -103,9 +107,13 @@ def is_valid_skill(skill):
     if len(skill) < 2 or len(skill) > 50:
         return False
 
+    if len(skill.split()) > 5:
+        return False
+
     bad_exact = {
         "none", "n/a", "na", "resume", "job", "description", "candidate",
-        "employee", "applicant", "role", "position", "company", "organization"
+        "employee", "applicant", "role", "position", "company", "organization",
+        "skills", "experience", "projects", "education", "activities"
     }
 
     if skill in bad_exact:
@@ -114,72 +122,178 @@ def is_valid_skill(skill):
     bad_contains = [
         "@", "http", "www", ".com", ".org", ".edu",
         "benefits", "salary", "compensation", "location",
-        "equal opportunity", "full time", "part time"
+        "equal opportunity", "full time", "part time",
+        "expected graduation", "gpa", "worcester", "fort worth",
+        "texas", "india", "atlanta", "colorado", "denver"
     ]
 
     if any(bad in skill for bad in bad_contains):
         return False
 
-    if skill.isdigit():
+    # likely names / citations / dates
+    if re.search(r"\b(19|20)\d{2}\b", skill):
+        return False
+
+    if re.search(r"\b[a-z]\.\b", skill):
         return False
 
     return True
 
 
+def dedupe_skills(skills):
+    cleaned = []
+    seen = set()
+
+    for skill in skills:
+        s = normalize_skill_text(skill)
+        if not is_valid_skill(s):
+            continue
+
+        # singular cleanup for a few common cases
+        replacements = {
+            "microsoft office suite": "microsoft office",
+            "basic rstudio": "rstudio",
+            "basic matlab": "matlab",
+        }
+        s = replacements.get(s, s)
+
+        if s not in seen:
+            seen.add(s)
+            cleaned.append(s)
+
+    return sorted(cleaned)
+
+
+# =========================================================
+# LLM HELPERS
+# =========================================================
+def run_llm(prompt, max_length=180):
+    try:
+        result = generator(prompt, max_length=max_length, do_sample=False)
+        return result[0]["generated_text"]
+    except Exception:
+        return ""
+
+
+def parse_llm_list(output_text):
+    raw_parts = re.split(r",|\n|;", output_text)
+    skills = [part.strip() for part in raw_parts if part.strip()]
+    return dedupe_skills(skills)
+
+
+# =========================================================
+# SECTION HELPERS
+# =========================================================
+def extract_resume_skills_section(resume_text):
+    text = clean_text(resume_text)
+    match = re.search(
+        r"skills\s*:(.*?)(activities\s*:|publications\s*:|projects\s*:|education\s*:|experience\s*:|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def extract_resume_experience_projects(resume_text):
+    text = clean_text(resume_text)
+    sections = []
+
+    for section_name in ["experience", "projects"]:
+        match = re.search(
+            rf"{section_name}\s*:(.*?)(education\s*:|skills\s*:|activities\s*:|publications\s*:|$)",
+            text,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if match:
+            sections.append(match.group(1).strip())
+
+    return "\n".join(sections).strip()
+
+
+def extract_job_relevant_section(job_text):
+    text = clean_text(job_text)
+    matches = []
+
+    for section_name in ["qualifications", "requirements", "experience", "responsibilities", "position summary"]:
+        match = re.search(
+            rf"{section_name}\s*:(.*?)(benefits\s*:|compensation\s*:|education\s*:|work environment\s*:|$)",
+            text,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if match:
+            matches.append(match.group(1).strip())
+
+    if matches:
+        return "\n".join(matches).strip()
+
+    return text[:2500]
+
+
 # =========================================================
 # AI SKILL EXTRACTION
 # =========================================================
-def ai_extract_skills(text):
+def ai_extract_resume_skills(resume_text):
+    skills_section = extract_resume_skills_section(resume_text)
+    exp_proj_section = extract_resume_experience_projects(resume_text)
+
     prompt = f"""
-Extract only SKILLS from the text.
+You are extracting resume skills.
 
-Skills include:
-- tools
-- technologies
-- methods
-- software
-- programming languages
-- technical processes
+Task:
+Extract only the applicant's real professional skills from the resume.
 
-Return ONLY comma-separated items.
-No sentences. No explanations.
+Priority:
+1. First use the explicit "Skills" section if it exists.
+2. Then include real tools, software, methods, programming languages, certifications,
+   and technical/domain skills shown in projects or experience.
+3. Do NOT include names, schools, locations, GPA, dates, publications, employers, or generic words.
 
-Text:
-{text[:2000]}
+Allowed examples:
+Python, SQL, Tableau, Android Studio, Simio, Excel, data visualization, simulation, machine learning
+
+Return only a comma-separated list.
+Do not explain anything.
+
+Resume Skills Section:
+{skills_section[:1200]}
+
+Resume Experience and Projects:
+{exp_proj_section[:1500]}
 """
 
-    try:
-        result = generator(prompt, max_length=150, do_sample=False)
-        output = result[0]["generated_text"]
+    output = run_llm(prompt, max_length=200)
+    return parse_llm_list(output)
 
-        raw = [s.strip().lower() for s in output.split(",") if s.strip()]
 
-        cleaned = []
+def ai_extract_job_skills(job_text):
+    relevant_job_text = extract_job_relevant_section(job_text)
 
-        for skill in raw:
-            # remove punctuation
-            skill = re.sub(r"[^a-zA-Z0-9\+\#\.\-/ ]", "", skill).strip()
+    prompt = f"""
+You are extracting job requirements.
 
-            # ❌ REMOVE BAD SKILLS
-            if (
-                len(skill.split()) > 3  # too long = sentence
-                or any(x in skill for x in [
-                    "company", "global", "team", "working",
-                    "building", "together", "future",
-                    "customer", "employees", "environment"
-                ])
-                or re.search(r"\b(inc|llc|corp|ltd)\b", skill)
-                or re.search(r"\b\d{4}\b", skill)  # years
-                or skill in ["clean", "collect", "production"]
-            ):
-                continue
+Task:
+Extract only the skills, tools, software, methods, certifications, domain knowledge,
+and technical/professional competencies required or preferred for this job.
 
-            cleaned.append(skill)
+Do NOT include:
+- company descriptions
+- benefits
+- locations
+- marketing phrases
+- general filler language
+- sentence fragments
 
-        return sorted(list(set(cleaned)))
+Return only a comma-separated list.
+Do not explain anything.
 
-    except:
-        return []
+Job Text:
+{relevant_job_text[:2200]}
+"""
+
+    output = run_llm(prompt, max_length=200)
+    return parse_llm_list(output)
 
 
 # =========================================================
@@ -193,8 +307,8 @@ def compute_match_score(resume_text, job_text):
 
 
 def compare_skills(resume_text, job_text):
-    resume_skills = set(ai_extract_skills(resume_text))
-    job_skills = set(ai_extract_skills(job_text))
+    resume_skills = set(ai_extract_resume_skills(resume_text))
+    job_skills = set(ai_extract_job_skills(job_text))
 
     matched = sorted(job_skills.intersection(resume_skills))
     missing = sorted(job_skills - resume_skills)
@@ -241,11 +355,10 @@ Rules:
 - Keep the response concise
 """
 
-    try:
-        result = generator(prompt, max_length=260, do_sample=False)
-        return result[0]["generated_text"]
-    except Exception:
-        return "AI suggestions are unavailable right now."
+    output = run_llm(prompt, max_length=260)
+    if output.strip():
+        return output
+    return "AI suggestions are unavailable right now."
 
 
 # =========================================================
