@@ -220,7 +220,7 @@ def simple_bullet_rewrites(resume_text, missing_skills):
 # Sidebar
 # -----------------------------
 st.sidebar.header("Instructions")
-st.sidebar.write("1. Upload your resume as PDF, DOCX, or TXT.")
+st.sidebar.write("1. Upload your resume as DOCX or TXT.")
 st.sidebar.write("2. Paste the target job description.")
 st.sidebar.write("3. Click Analyze.")
 st.sidebar.write("4. Review the score and suggestions.")
