@@ -109,17 +109,26 @@ def clean_text(text):
 # =========================================================
 # SKILL EXTRACTION
 # =========================================================
-def extract_known_skills(text):
-    lower_text = text.lower()
-    found = []
+def ai_extract_skills(text):
+    prompt = f"""
+Extract ONLY the technical skills, tools, and programming languages from the text below.
 
-    for skill in KNOWN_SKILLS:
-        pattern = r"\b" + re.escape(skill.lower()) + r"\b"
-        if re.search(pattern, lower_text):
-            found.append(skill)
+Return a clean comma-separated list.
+Do NOT include locations, benefits, companies, or general words.
 
-    return sorted(list(set(found)))
+Text:
+{text[:2000]}
+"""
 
+    try:
+        result = generator(prompt, max_length=150, do_sample=False)
+        output = result[0]["generated_text"]
+
+        skills = [s.strip().lower() for s in output.split(",") if s.strip()]
+        return list(set(skills))
+
+    except:
+        return []
 
 def compute_match_score(resume_text, job_text):
     resume_emb = embed_model.encode([resume_text])
