@@ -125,10 +125,16 @@ def ai_identify_resume_skills(resume_text):
     prompt = f"""
 Read this resume and identify the skills the person actually has.
 
+Skills can easily be identify by a section called Skills
+
+if not locate a bunch listed skills
+
+an example may be a list in the resume
+
 Return only a comma-separated list of skills.
 
 Resume:
-{resume_text[:2500]}
+{resume_text[:10000]}
 """
 
     output = run_llm(prompt, max_new_tokens=140)
@@ -142,7 +148,7 @@ Read this job description and identify the required or preferred skills.
 Return only a comma-separated list of skills.
 
 Job Description:
-{job_text[:2500]}
+{job_text[:10000]}
 """
 
     output = run_llm(prompt, max_new_tokens=140)
