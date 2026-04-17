@@ -1,16 +1,21 @@
 import json
-import re
+import os
 import time
 
 import docx
 import pdfplumber
 import streamlit as st
-import torch
+from huggingface_hub import InferenceClient
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-LLM_MODEL_NAME = "google/flan-t5-base"
+# Set these in Streamlit secrets or environment variables
+HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN", ""))
+HF_MODEL = st.secrets.get(
+    "HF_MODEL",
+    os.getenv("HF_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+)
+
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
 st.set_page_config(page_title="HireSense", layout="wide")
@@ -20,7 +25,7 @@ st.subheader("AI Resume & Job Description Matching Web Application")
 
 st.write(
     "Upload a resume and paste a job description to receive an overall match score, "
-    "AI-identified skills, and AI-generated improvement suggestions."
+    "AI-extracted skills, and AI-generated improvement suggestions."
 )
 
 
@@ -33,14 +38,12 @@ def load_embedding_model():
 
 
 @st.cache_resource
-def load_llm():
-    tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
-    model = AutoModelForSeq2SeqLM.from_pretrained(LLM_MODEL_NAME)
-    return tokenizer, model
+def load_llm_client():
+    return InferenceClient(api_key=HF_TOKEN)
 
 
 embed_model = load_embedding_model()
-tokenizer, llm_model = load_llm()
+hf_client = load_llm_client()
 
 
 # =========================================================
@@ -58,7 +61,7 @@ def extract_text_from_pdf(uploaded_file):
 
 def extract_text_from_docx(uploaded_file):
     doc = docx.Document(uploaded_file)
-    return "\n".join([para.text for para in doc.paragraphs])
+    return "\n".join(para.text for para in doc.paragraphs)
 
 
 def extract_text_from_txt(uploaded_file):
@@ -85,186 +88,67 @@ def extract_uploaded_text(uploaded_file):
 
 
 # =========================================================
-# TEXT PREP
+# BASIC TEXT PREP
 # =========================================================
 def prepare_text(text):
-    text = text.replace("\r", "\n")
-    text = text.replace("\t", " ")
-    text = re.sub(r"[•▪◦]", "•", text)
-    text = re.sub(r"\n+", "\n", text)
-    return text.strip()
+    return text.replace("\r", "\n").replace("\t", " ").strip()
 
 
 # =========================================================
-# SECTION EXTRACTION
+# LLM HELPERS
 # =========================================================
-def extract_section(text, start_labels, stop_labels):
-    prepared = prepare_text(text)
-    lower = prepared.lower()
-
-    start_positions = []
-    for label in start_labels:
-        idx = lower.find(label.lower() + ":")
-        if idx != -1:
-            start_positions.append(idx)
-
-    if not start_positions:
-        return ""
-
-    start_idx = min(start_positions)
-    tail = prepared[start_idx:]
-    tail_lower = tail.lower()
-
-    stop_positions = []
-    for label in stop_labels:
-        idx = tail_lower.find(label.lower() + ":")
-        if idx > 0:
-            stop_positions.append(idx)
-
-    if stop_positions:
-        end_idx = min(stop_positions)
-        return tail[:end_idx].strip()
-
-    return tail.strip()
-
-
-def extract_resume_relevant_text(resume_text):
-    skills = extract_section(
-        resume_text,
-        start_labels=["skills"],
-        stop_labels=["activities", "publications", "projects", "education", "experience"]
-    )
-
-    experience = extract_section(
-        resume_text,
-        start_labels=["experience"],
-        stop_labels=["education", "skills", "activities", "publications", "projects"]
-    )
-
-    projects = extract_section(
-        resume_text,
-        start_labels=["projects"],
-        stop_labels=["education", "skills", "activities", "publications", "experience"]
-    )
-
-    parts = []
-    if skills:
-        parts.append("SKILLS SECTION:\n" + skills)
-    if experience:
-        parts.append("EXPERIENCE SECTION:\n" + experience)
-    if projects:
-        parts.append("PROJECTS SECTION:\n" + projects)
-
-    return "\n\n".join(parts).strip()
-
-
-def extract_job_relevant_text(job_text):
-    qualifications = extract_section(
-        job_text,
-        start_labels=["qualifications"],
-        stop_labels=["experience", "education", "compensation", "benefits", "work environment", "co only"]
-    )
-
-    experience = extract_section(
-        job_text,
-        start_labels=["experience"],
-        stop_labels=["education", "compensation", "benefits", "work environment", "co only"]
-    )
-
-    responsibilities = extract_section(
-        job_text,
-        start_labels=["responsibilities"],
-        stop_labels=["work environment", "qualifications", "experience", "education", "compensation", "benefits", "co only"]
-    )
-
-    summary = extract_section(
-        job_text,
-        start_labels=["position summary"],
-        stop_labels=["responsibilities", "work environment", "qualifications", "experience", "education", "compensation", "benefits", "co only"]
-    )
-
-    parts = []
-    if qualifications:
-        parts.append("QUALIFICATIONS:\n" + qualifications)
-    if experience:
-        parts.append("EXPERIENCE:\n" + experience)
-    if responsibilities:
-        parts.append("RESPONSIBILITIES:\n" + responsibilities)
-    if summary:
-        parts.append("POSITION SUMMARY:\n" + summary)
-
-    return "\n\n".join(parts).strip()
-
-
-# =========================================================
-# LLM HELPER
-# =========================================================
-def run_llm(prompt, max_new_tokens=180):
+def run_chat(messages, max_tokens=500):
     try:
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=768
+        completion = hf_client.chat_completion(
+            model=HF_MODEL,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0
         )
-
-        with torch.no_grad():
-            outputs = llm_model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                num_beams=4,
-                early_stopping=True,
-            )
-
-        decoded = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
-        return decoded
-    except Exception:
-        return ""
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        return f"ERROR: {e}"
 
 
-def parse_json_array(output_text):
+def parse_json_array(text):
     try:
-        start = output_text.find("[")
-        end = output_text.rfind("]")
+        start = text.find("[")
+        end = text.rfind("]")
         if start != -1 and end != -1 and end > start:
-            data = json.loads(output_text[start:end + 1])
-            if isinstance(data, list):
-                return sorted(
-                    list(
-                        {
-                            str(item).strip().lower()
-                            for item in data
-                            if str(item).strip()
-                        }
-                    )
-                )
+            arr = json.loads(text[start:end + 1])
+            if isinstance(arr, list):
+                return sorted(list({str(x).strip() for x in arr if str(x).strip()}))
     except Exception:
-        return []
-
+        pass
     return []
 
 
 # =========================================================
-# AI SKILL IDENTIFICATION
+# AI EXTRACTION
 # =========================================================
 def ai_identify_resume_skills(resume_text):
-    relevant_text = extract_resume_relevant_text(resume_text)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You extract skills from resumes. "
+                "Return only valid JSON. "
+                "Output must be a JSON array of strings and nothing else."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"""
+Read this resume and identify the actual skills the person has.
 
-    prompt = f"""
-You are extracting actual skills from a resume.
-
-Task:
-Return only the real skills the candidate has.
-
-Include:
+Include only real skills such as:
 - programming languages
 - software
 - tools
 - platforms
 - technical methods
 - certifications
-- clearly demonstrated professional skills
+- professional skills clearly demonstrated or explicitly listed
 
 Do not include:
 - names
@@ -273,32 +157,39 @@ Do not include:
 - dates
 - GPA
 - employers
-- publication titles
-- role titles
+- paper titles
+- publication citations
 - section headers
-- explanations
+- job titles by themselves
 
-Return ONLY valid JSON.
-Return a JSON array of strings.
+Return only a JSON array of strings.
 
-Resume text:
-{relevant_text[:2200]}
-"""
+Resume:
+{resume_text[:5000]}
+""",
+        },
+    ]
 
-    output = run_llm(prompt, max_new_tokens=160)
+    output = run_chat(messages, max_tokens=400)
     return parse_json_array(output)
 
 
 def ai_identify_job_skills(job_text):
-    relevant_text = extract_job_relevant_text(job_text)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You extract required skills from job descriptions. "
+                "Return only valid JSON. "
+                "Output must be a JSON array of strings and nothing else."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"""
+Read this job description and identify the actual required or preferred skills.
 
-    prompt = f"""
-You are extracting actual required or preferred skills from a job description.
-
-Task:
-Return only the real skills required or preferred for this job.
-
-Include:
+Include only:
 - programming languages
 - software
 - tools
@@ -314,17 +205,59 @@ Do not include:
 - locations
 - marketing language
 - role titles by themselves
-- explanations
+- section headers
+- sentence fragments
 
-Return ONLY valid JSON.
-Return a JSON array of strings.
+Return only a JSON array of strings.
 
-Job text:
-{relevant_text[:2200]}
-"""
+Job Description:
+{job_text[:5000]}
+""",
+        },
+    ]
 
-    output = run_llm(prompt, max_new_tokens=160)
+    output = run_chat(messages, max_tokens=400)
     return parse_json_array(output)
+
+
+def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills):
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a professional resume assistant. "
+                "Be concise, practical, and do not invent experience."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"""
+Compare this resume with this job description.
+
+Matched skills:
+{", ".join(matched_skills)}
+
+Missing skills:
+{", ".join(missing_skills)}
+
+Write exactly:
+1. Three practical resume improvements
+2. Two stronger bullet point rewrite ideas
+3. One short professional summary tailored to the job
+
+Resume:
+{resume_text[:3000]}
+
+Job Description:
+{job_text[:3000]}
+""",
+        },
+    ]
+
+    output = run_chat(messages, max_tokens=500)
+    if output.startswith("ERROR:"):
+        return "AI suggestions are unavailable right now."
+    return output
 
 
 # =========================================================
@@ -353,51 +286,10 @@ def compare_skills(resume_text, job_text):
 
 
 # =========================================================
-# SUGGESTIONS
-# =========================================================
-def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills):
-    prompt = f"""
-You are a professional resume assistant.
-
-Write:
-1. Three practical resume improvements
-2. Two bullet point rewrite ideas
-3. One short professional summary tailored to the job
-
-Use the information below.
-Do not invent fake experience.
-Be concise.
-
-Matched skills:
-{", ".join(matched_skills)}
-
-Missing skills:
-{", ".join(missing_skills)}
-
-Resume:
-{resume_text[:1400]}
-
-Job Description:
-{job_text[:1400]}
-"""
-
-    output = run_llm(prompt, max_new_tokens=180)
-    return output if output.strip() else "AI suggestions are unavailable right now."
-
-
-# =========================================================
 # UI
 # =========================================================
-uploaded_resume = st.file_uploader(
-    "Upload Resume",
-    type=["pdf", "docx", "txt"]
-)
-
-job_description = st.text_area(
-    "Paste Job Description",
-    height=300
-)
-
+uploaded_resume = st.file_uploader("Upload Resume", type=["pdf", "docx", "txt"])
+job_description = st.text_area("Paste Job Description", height=300)
 analyze = st.button("Analyze")
 
 
@@ -405,7 +297,9 @@ analyze = st.button("Analyze")
 # MAIN
 # =========================================================
 if analyze:
-    if uploaded_resume is None:
+    if not HF_TOKEN:
+        st.error("Missing HF_TOKEN. Add it to Streamlit secrets or environment variables.")
+    elif uploaded_resume is None:
         st.warning("Please upload a resume.")
     elif not job_description.strip():
         st.warning("Please paste a job description.")
