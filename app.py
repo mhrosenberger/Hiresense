@@ -139,24 +139,6 @@ def ai_identify_job_skills(job_text):
     prompt = f"""
 Read this job description and identify the required or preferred skills.
 
-Include only:
-- software
-- tools
-- programming languages
-- platforms
-- technical methods
-- certifications
-- domain knowledge
-- professional skills required for the role
-
-Do not include:
-- company descriptions
-- benefits
-- locations
-- marketing text
-- sentence fragments
-- section headers
-
 Return only a comma-separated list of skills.
 
 Job Description:
