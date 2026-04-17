@@ -99,26 +99,23 @@ def prepare_text(text):
 # SECTION EXTRACTION
 # =========================================================
 def extract_section(text, start_labels, stop_labels):
-    """
-    Extracts text between a start label and the next stop label.
-    """
     prepared = prepare_text(text)
     lower = prepared.lower()
 
-    starts = []
+    start_positions = []
     for label in start_labels:
         idx = lower.find(label.lower() + ":")
         if idx != -1:
-            starts.append(idx)
+            start_positions.append(idx)
 
-    if not starts:
+    if not start_positions:
         return ""
 
-    start_idx = min(starts)
+    start_idx = min(start_positions)
     tail = prepared[start_idx:]
+    tail_lower = tail.lower()
 
     stop_positions = []
-    tail_lower = tail.lower()
     for label in stop_labels:
         idx = tail_lower.find(label.lower() + ":")
         if idx > 0:
@@ -150,15 +147,15 @@ def extract_resume_relevant_text(resume_text):
         stop_labels=["education", "skills", "activities", "publications", "experience"]
     )
 
-    relevant_parts = []
+    parts = []
     if skills:
-        relevant_parts.append(skills)
+        parts.append("SKILLS SECTION:\n" + skills)
     if experience:
-        relevant_parts.append(experience)
+        parts.append("EXPERIENCE SECTION:\n" + experience)
     if projects:
-        relevant_parts.append(projects)
+        parts.append("PROJECTS SECTION:\n" + projects)
 
-    return "\n\n".join(relevant_parts).strip()
+    return "\n\n".join(parts).strip()
 
 
 def extract_job_relevant_text(job_text):
@@ -186,17 +183,17 @@ def extract_job_relevant_text(job_text):
         stop_labels=["responsibilities", "work environment", "qualifications", "experience", "education", "compensation", "benefits", "co only"]
     )
 
-    relevant_parts = []
+    parts = []
     if qualifications:
-        relevant_parts.append(qualifications)
+        parts.append("QUALIFICATIONS:\n" + qualifications)
     if experience:
-        relevant_parts.append(experience)
+        parts.append("EXPERIENCE:\n" + experience)
     if responsibilities:
-        relevant_parts.append(responsibilities)
+        parts.append("RESPONSIBILITIES:\n" + responsibilities)
     if summary:
-        relevant_parts.append(summary)
+        parts.append("POSITION SUMMARY:\n" + summary)
 
-    return "\n\n".join(relevant_parts).strip()
+    return "\n\n".join(parts).strip()
 
 
 # =========================================================
@@ -226,26 +223,23 @@ def run_llm(prompt, max_new_tokens=180):
         return ""
 
 
-def parse_json_skills(output_text):
-    """
-    Expect output like:
-    ["python", "sql", "tableau"]
-    """
+def parse_json_array(output_text):
     try:
         start = output_text.find("[")
         end = output_text.rfind("]")
         if start != -1 and end != -1 and end > start:
-            json_text = output_text[start:end + 1]
-            data = json.loads(json_text)
+            data = json.loads(output_text[start:end + 1])
             if isinstance(data, list):
-                return sorted(list(set([str(x).strip() for x in data if str(x).strip()])))
+                cleaned = []
+                for item in data:
+                    s = str(item).strip()
+                    if s:
+                        cleaned.append(s)
+                return sorted(list(set(cleaned)))
     except Exception:
         pass
 
-    # fallback: line/comma split if model doesn't return valid JSON
-    parts = re.split(r",|\n|;", output_text)
-    skills = [p.strip() for p in parts if p.strip()]
-    return sorted(list(set(skills)))
+    return []
 
 
 # =========================================================
@@ -255,74 +249,107 @@ def ai_identify_resume_skills(resume_text):
     relevant_text = extract_resume_relevant_text(resume_text)
 
     prompt = f"""
-Extract the candidate's actual skills from the resume content below.
+You are extracting skills from a resume.
 
-Return ONLY a JSON array of strings.
+Read the text and identify the actual skills the candidate has.
 
-Include:
-- software
-- tools
-- programming languages
-- platforms
-- technical methods
-- certifications
-- professional skills clearly shown in the resume
+Important:
+- Prioritize the explicit SKILLS SECTION first.
+- Then add additional real skills shown in experience and projects.
+- Include tools, software, programming languages, platforms, methods, certifications, and technical/professional skills.
+- Do not include names, schools, cities, dates, GPA, employers, publication titles, or role titles.
 
-Do NOT include:
-- names
-- schools
-- locations
-- dates
-- GPA
-- employers
-- publication titles
-- sentence fragments
+Return ONLY valid JSON in this format:
+["skill 1", "skill 2", "skill 3"]
 
-Example output:
-["python", "sql", "tableau"]
-
-Resume content:
+Resume text:
 {relevant_text[:2200]}
 """
 
     output = run_llm(prompt, max_new_tokens=160)
-    return parse_json_skills(output)
+    skills = parse_json_array(output)
+
+    # Fallback: if the model fails badly, ask a second simpler extraction only on the skills section
+    if not skills:
+        skills_only = extract_section(
+            resume_text,
+            start_labels=["skills"],
+            stop_labels=["activities", "publications", "projects", "education", "experience"]
+        )
+
+        if skills_only:
+            fallback_prompt = f"""
+Extract the actual skills from this resume skills section.
+
+Return ONLY valid JSON like:
+["python", "sql", "tableau"]
+
+Text:
+{skills_only[:1200]}
+"""
+            output = run_llm(fallback_prompt, max_new_tokens=120)
+            skills = parse_json_array(output)
+
+    return skills
 
 
 def ai_identify_job_skills(job_text):
     relevant_text = extract_job_relevant_text(job_text)
 
     prompt = f"""
-Extract the required or preferred skills from the job content below.
+You are extracting required or preferred skills from a job description.
 
-Return ONLY a JSON array of strings.
+Read the text and identify the actual job skills.
 
 Include:
-- software
 - tools
+- software
 - programming languages
 - platforms
 - technical methods
 - certifications
 - domain knowledge
-- professional skills required for the role
+- technical/professional skills required for the role
 
-Do NOT include:
-- company descriptions
+Do not include:
+- company description
 - benefits
 - locations
-- marketing language
-- sentence fragments
+- generic marketing language
+- job titles by themselves
 
-Example output:
-["python", "sql", "power bi"]
+Return ONLY valid JSON in this format:
+["skill 1", "skill 2", "skill 3"]
 
-Job content:
+Job text:
 {relevant_text[:2200]}
 """
 
     output = run_llm(prompt, max_new_tokens=160)
-    return parse_json_skills(output)
+    skills = parse_json_array(output)
+
+    # Fallback: ask only on qualifications if needed
+    if not skills:
+        qualifications = extract_section(
+            job_text,
+            start_labels=["qualifications"],
+            stop_labels=["experience", "education", "compensation", "benefits", "work environment", "co only"]
+        )
+
+        if qualifications:
+            fallback_prompt = f"""
+Extract the actual required skills from this qualifications section.
+
+Return ONLY valid JSON like:
+["python", "sql", "tableau"]
+
+Text:
+{qualifications[:1200]}
+"""
+            output = run_llm(fallback_prompt, max_new_tokens=120)
+            skills = parse_json_array(output)
+
+    return skills
 
 
 # =========================================================
@@ -355,12 +382,16 @@ def compare_skills(resume_text, job_text):
 # =========================================================
 def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills):
     prompt = f"""
-Write exactly:
+You are a professional resume assistant.
+
+Using the resume and job description below, write:
 1. Three practical resume improvements
 2. Two bullet point rewrite ideas
 3. One short professional summary
 
-Use the information below.
+Use the matched and missing skills below.
+Do not invent fake experience.
+Be concise.
 
 Matched skills:
 {", ".join(matched_skills)}
