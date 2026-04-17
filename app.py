@@ -1,3 +1,4 @@
+import re
 import time
 
 import docx
@@ -83,13 +84,31 @@ def extract_uploaded_text(uploaded_file):
 # TEXT PREP
 # =========================================================
 def prepare_text(text):
-    return text.replace("\r", "\n").replace("\t", " ").strip()
+    text = text.replace("\r", "\n")
+    text = text.replace("\t", " ")
+    text = re.sub(r"[•▪◦]", "•", text)
+    text = re.sub(r"\n+", "\n", text)
+    return text.strip()
+
+
+def parse_skill_lines(output_text):
+    lines = [line.strip() for line in output_text.split("\n") if line.strip()]
+
+    cleaned = []
+    for line in lines:
+        line = re.sub(r"^\d+[\.\)]\s*", "", line)
+        line = re.sub(r"^[-•*]\s*", "", line)
+        line = line.strip()
+        if line:
+            cleaned.append(line)
+
+    return sorted(list(set(cleaned)))
 
 
 # =========================================================
 # LLM HELPER
 # =========================================================
-def run_llm(prompt, max_new_tokens=160):
+def run_llm(prompt, max_new_tokens=120):
     try:
         inputs = tokenizer(
             prompt,
@@ -103,7 +122,7 @@ def run_llm(prompt, max_new_tokens=160):
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                num_beams=5,
+                num_beams=4,
                 early_stopping=True
             )
 
@@ -113,46 +132,104 @@ def run_llm(prompt, max_new_tokens=160):
         return ""
 
 
-def parse_ai_list(output_text):
-    parts = output_text.replace("\n", ",").split(",")
-    return sorted(list(set([part.strip() for part in parts if part.strip()])))
+# =========================================================
+# SECTION EXTRACTION
+# =========================================================
+def extract_resume_skills_section(resume_text):
+    text = prepare_text(resume_text)
+    match = re.search(
+        r"skills\s*:(.*?)(activities\s*:|publications\s*:|projects\s*:|education\s*:|experience\s*:|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def extract_resume_experience_projects(resume_text):
+    text = prepare_text(resume_text)
+    chunks = []
+
+    for section_name in ["experience", "projects"]:
+        match = re.search(
+            rf"{section_name}\s*:(.*?)(education\s*:|skills\s*:|activities\s*:|publications\s*:|$)",
+            text,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if match:
+            chunks.append(match.group(1).strip())
+
+    return "\n".join(chunks).strip()
+
+
+def extract_job_relevant_section(job_text):
+    text = prepare_text(job_text)
+    chunks = []
+
+    for section_name in ["qualifications", "experience", "responsibilities", "position summary"]:
+        match = re.search(
+            rf"{section_name}\s*:(.*?)(benefits\s*:|compensation\s*:|education\s*:|work environment\s*:|co only\s*:|$)",
+            text,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if match:
+            chunks.append(match.group(1).strip())
+
+    if chunks:
+        return "\n".join(chunks).strip()
+
+    return text[:2000]
 
 
 # =========================================================
-# AI SKILL EXTRACTION
+# AI SKILL IDENTIFICATION
 # =========================================================
 def ai_identify_resume_skills(resume_text):
+    skills_section = extract_resume_skills_section(resume_text)
+    exp_proj_section = extract_resume_experience_projects(resume_text)
+
     prompt = f"""
-Read this resume and identify the skills the person actually has.
+Extract the candidate's actual skills from this resume.
 
-Skills can easily be identify by a section called Skills
+Rules:
+- Output one skill per line
+- Focus first on the Skills section
+- Then include additional tools, software, programming languages, platforms,
+  methods, and technical skills shown in projects and experience
+- Do not include names, schools, locations, dates, GPA, employers, or publication citations
+- Do not write sentences
 
-if not locate a bunch listed skills
+Resume Skills Section:
+{skills_section[:1200]}
 
-an example may be a list in the resume
-
-Return only a comma-separated list of skills.
-
-Resume:
-{resume_text[:10000]}
+Resume Experience and Projects:
+{exp_proj_section[:1200]}
 """
 
-    output = run_llm(prompt, max_new_tokens=140)
-    return parse_ai_list(output)
+    output = run_llm(prompt, max_new_tokens=120)
+    return parse_skill_lines(output)
 
 
 def ai_identify_job_skills(job_text):
-    prompt = f"""
-Read this job description and identify the required or preferred skills.
+    relevant_job_text = extract_job_relevant_section(job_text)
 
-Return only a comma-separated list of skills.
+    prompt = f"""
+Extract the required or preferred job skills from this job description.
+
+Rules:
+- Output one skill per line
+- Include tools, software, programming languages, platforms, methods,
+  technical skills, domain knowledge, and certifications
+- Do not include company descriptions, benefits, locations, or sentence fragments
+- Do not write sentences
 
 Job Description:
-{job_text[:10000]}
+{relevant_job_text[:1800]}
 """
 
-    output = run_llm(prompt, max_new_tokens=140)
-    return parse_ai_list(output)
+    output = run_llm(prompt, max_new_tokens=120)
+    return parse_skill_lines(output)
 
 
 # =========================================================
@@ -181,33 +258,31 @@ def compare_skills(resume_text, job_text):
 
 
 # =========================================================
-# AI SUGGESTIONS
+# SUGGESTIONS
 # =========================================================
 def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills):
     prompt = f"""
-Compare this resume to this job description.
+Compare this resume and job description.
 
-Resume:
-{resume_text[:1800]}
-
-Job Description:
-{job_text[:1800]}
-
-Matched Skills:
+Matched skills:
 {", ".join(matched_skills)}
 
-Missing Skills:
+Missing skills:
 {", ".join(missing_skills)}
 
 Write exactly:
-1. Three practical improvements
-2. Two stronger bullet point rewrite ideas
-3. One short professional summary tailored to the job
+1. Three practical resume improvements
+2. Two bullet point rewrite ideas
+3. One short professional summary
 
-Keep it concise.
+Resume:
+{resume_text[:1400]}
+
+Job Description:
+{job_text[:1400]}
 """
 
-    output = run_llm(prompt, max_new_tokens=220)
+    output = run_llm(prompt, max_new_tokens=180)
     if output.strip():
         return output
     return "AI suggestions are unavailable right now."
