@@ -1,3 +1,4 @@
+import json
 import re
 import time
 
@@ -23,6 +24,9 @@ st.write(
 )
 
 
+# =========================================================
+# LOAD MODELS
+# =========================================================
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -91,24 +95,114 @@ def prepare_text(text):
     return text.strip()
 
 
-def parse_skill_lines(output_text):
-    lines = [line.strip() for line in output_text.split("\n") if line.strip()]
+# =========================================================
+# SECTION EXTRACTION
+# =========================================================
+def extract_section(text, start_labels, stop_labels):
+    """
+    Extracts text between a start label and the next stop label.
+    """
+    prepared = prepare_text(text)
+    lower = prepared.lower()
 
-    cleaned = []
-    for line in lines:
-        line = re.sub(r"^\d+[\.\)]\s*", "", line)
-        line = re.sub(r"^[-•*]\s*", "", line)
-        line = line.strip()
-        if line:
-            cleaned.append(line)
+    starts = []
+    for label in start_labels:
+        idx = lower.find(label.lower() + ":")
+        if idx != -1:
+            starts.append(idx)
 
-    return sorted(list(set(cleaned)))
+    if not starts:
+        return ""
+
+    start_idx = min(starts)
+    tail = prepared[start_idx:]
+
+    stop_positions = []
+    tail_lower = tail.lower()
+    for label in stop_labels:
+        idx = tail_lower.find(label.lower() + ":")
+        if idx > 0:
+            stop_positions.append(idx)
+
+    if stop_positions:
+        end_idx = min(stop_positions)
+        return tail[:end_idx].strip()
+
+    return tail.strip()
+
+
+def extract_resume_relevant_text(resume_text):
+    skills = extract_section(
+        resume_text,
+        start_labels=["skills"],
+        stop_labels=["activities", "publications", "projects", "education", "experience"]
+    )
+
+    experience = extract_section(
+        resume_text,
+        start_labels=["experience"],
+        stop_labels=["education", "skills", "activities", "publications", "projects"]
+    )
+
+    projects = extract_section(
+        resume_text,
+        start_labels=["projects"],
+        stop_labels=["education", "skills", "activities", "publications", "experience"]
+    )
+
+    relevant_parts = []
+    if skills:
+        relevant_parts.append(skills)
+    if experience:
+        relevant_parts.append(experience)
+    if projects:
+        relevant_parts.append(projects)
+
+    return "\n\n".join(relevant_parts).strip()
+
+
+def extract_job_relevant_text(job_text):
+    qualifications = extract_section(
+        job_text,
+        start_labels=["qualifications"],
+        stop_labels=["experience", "education", "compensation", "benefits", "work environment", "co only"]
+    )
+
+    experience = extract_section(
+        job_text,
+        start_labels=["experience"],
+        stop_labels=["education", "compensation", "benefits", "work environment", "co only"]
+    )
+
+    responsibilities = extract_section(
+        job_text,
+        start_labels=["responsibilities"],
+        stop_labels=["work environment", "qualifications", "experience", "education", "compensation", "benefits", "co only"]
+    )
+
+    summary = extract_section(
+        job_text,
+        start_labels=["position summary"],
+        stop_labels=["responsibilities", "work environment", "qualifications", "experience", "education", "compensation", "benefits", "co only"]
+    )
+
+    relevant_parts = []
+    if qualifications:
+        relevant_parts.append(qualifications)
+    if experience:
+        relevant_parts.append(experience)
+    if responsibilities:
+        relevant_parts.append(responsibilities)
+    if summary:
+        relevant_parts.append(summary)
+
+    return "\n\n".join(relevant_parts).strip()
 
 
 # =========================================================
 # LLM HELPER
 # =========================================================
-def run_llm(prompt, max_new_tokens=120):
+def run_llm(prompt, max_new_tokens=180):
     try:
         inputs = tokenizer(
             prompt,
@@ -132,104 +226,103 @@ def run_llm(prompt, max_new_tokens=120):
         return ""
 
 
-# =========================================================
-# SECTION EXTRACTION
-# =========================================================
-def extract_resume_skills_section(resume_text):
-    text = prepare_text(resume_text)
-    match = re.search(
-        r"skills\s*:(.*?)(activities\s*:|publications\s*:|projects\s*:|education\s*:|experience\s*:|$)",
-        text,
-        flags=re.IGNORECASE | re.DOTALL
-    )
-    if match:
-        return match.group(1).strip()
-    return ""
+def parse_json_skills(output_text):
+    """
+    Expect output like:
+    ["python", "sql", "tableau"]
+    """
+    try:
+        start = output_text.find("[")
+        end = output_text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            json_text = output_text[start:end + 1]
+            data = json.loads(json_text)
+            if isinstance(data, list):
+                return sorted(list(set([str(x).strip() for x in data if str(x).strip()])))
+    except Exception:
+        pass
 
-
-def extract_resume_experience_projects(resume_text):
-    text = prepare_text(resume_text)
-    chunks = []
-
-    for section_name in ["experience", "projects"]:
-        match = re.search(
-            rf"{section_name}\s*:(.*?)(education\s*:|skills\s*:|activities\s*:|publications\s*:|$)",
-            text,
-            flags=re.IGNORECASE | re.DOTALL
-        )
-        if match:
-            chunks.append(match.group(1).strip())
-
-    return "\n".join(chunks).strip()
-
-
-def extract_job_relevant_section(job_text):
-    text = prepare_text(job_text)
-    chunks = []
-
-    for section_name in ["qualifications", "experience", "responsibilities", "position summary"]:
-        match = re.search(
-            rf"{section_name}\s*:(.*?)(benefits\s*:|compensation\s*:|education\s*:|work environment\s*:|co only\s*:|$)",
-            text,
-            flags=re.IGNORECASE | re.DOTALL
-        )
-        if match:
-            chunks.append(match.group(1).strip())
-
-    if chunks:
-        return "\n".join(chunks).strip()
-
-    return text[:2000]
+    # fallback: line/comma split if model doesn't return valid JSON
+    parts = re.split(r",|\n|;", output_text)
+    skills = [p.strip() for p in parts if p.strip()]
+    return sorted(list(set(skills)))
 
 
 # =========================================================
 # AI SKILL IDENTIFICATION
 # =========================================================
 def ai_identify_resume_skills(resume_text):
-    skills_section = extract_resume_skills_section(resume_text)
-    exp_proj_section = extract_resume_experience_projects(resume_text)
+    relevant_text = extract_resume_relevant_text(resume_text)
 
     prompt = f"""
-Extract the candidate's actual skills from this resume.
+Extract the candidate's actual skills from the resume content below.
 
-Rules:
-- Output one skill per line
-- Focus first on the Skills section
-- Then include additional tools, software, programming languages, platforms,
-  methods, and technical skills shown in projects and experience
-- Do not include names, schools, locations, dates, GPA, employers, or publication citations
-- Do not write sentences
+Return ONLY a JSON array of strings.
 
-Resume Skills Section:
-{skills_section[:1200]}
+Include:
+- software
+- tools
+- programming languages
+- platforms
+- technical methods
+- certifications
+- professional skills clearly shown in the resume
 
-Resume Experience and Projects:
-{exp_proj_section[:1200]}
+Do NOT include:
+- names
+- schools
+- locations
+- dates
+- GPA
+- employers
+- publication titles
+- sentence fragments
+
+Example output:
+["python", "sql", "tableau"]
+
+Resume content:
+{relevant_text[:2200]}
 """
 
-    output = run_llm(prompt, max_new_tokens=120)
-    return parse_skill_lines(output)
+    output = run_llm(prompt, max_new_tokens=160)
+    return parse_json_skills(output)
 
 
 def ai_identify_job_skills(job_text):
-    relevant_job_text = extract_job_relevant_section(job_text)
+    relevant_text = extract_job_relevant_text(job_text)
 
     prompt = f"""
-Extract the required or preferred job skills from this job description.
+Extract the required or preferred skills from the job content below.
 
-Rules:
-- Output one skill per line
-- Include tools, software, programming languages, platforms, methods,
-  technical skills, domain knowledge, and certifications
-- Do not include company descriptions, benefits, locations, or sentence fragments
-- Do not write sentences
+Return ONLY a JSON array of strings.
 
-Job Description:
-{relevant_job_text[:1800]}
+Include:
+- software
+- tools
+- programming languages
+- platforms
+- technical methods
+- certifications
+- domain knowledge
+- professional skills required for the role
+
+Do NOT include:
+- company descriptions
+- benefits
+- locations
+- marketing language
+- sentence fragments
+
+Example output:
+["python", "sql", "power bi"]
+
+Job content:
+{relevant_text[:2200]}
 """
 
-    output = run_llm(prompt, max_new_tokens=120)
-    return parse_skill_lines(output)
+    output = run_llm(prompt, max_new_tokens=160)
+    return parse_json_skills(output)
 
 
 # =========================================================
@@ -262,18 +355,18 @@ def compare_skills(resume_text, job_text):
 # =========================================================
 def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills):
     prompt = f"""
-Compare this resume and job description.
+Write exactly:
+1. Three practical resume improvements
+2. Two bullet point rewrite ideas
+3. One short professional summary
+
+Use the information below.
 
 Matched skills:
 {", ".join(matched_skills)}
 
 Missing skills:
 {", ".join(missing_skills)}
-
-Write exactly:
-1. Three practical resume improvements
-2. Two bullet point rewrite ideas
-3. One short professional summary
 
 Resume:
 {resume_text[:1400]}
@@ -283,9 +376,7 @@ Job Description:
 """
 
     output = run_llm(prompt, max_new_tokens=180)
-    if output.strip():
-        return output
-    return "AI suggestions are unavailable right now."
+    return output if output.strip() else "AI suggestions are unavailable right now."
 
 
 # =========================================================
