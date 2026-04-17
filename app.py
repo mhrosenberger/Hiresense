@@ -125,26 +125,6 @@ def ai_identify_resume_skills(resume_text):
     prompt = f"""
 Read this resume and identify the skills the person actually has.
 
-Include only real skills the person demonstrates or explicitly lists, such as:
-- software
-- tools
-- programming languages
-- platforms
-- technical methods
-- certifications
-- professional skills
-
-Do not include:
-- names
-- schools
-- locations
-- dates
-- GPA
-- employers
-- publication titles
-- paper citations
-- section headers
-
 Return only a comma-separated list of skills.
 
 Resume:
