@@ -74,9 +74,9 @@ def extract_uploaded_text(uploaded_file):
     try:
         if filename.endswith(".pdf"):
             return extract_text_from_pdf(uploaded_file)
-        elif filename.endswith(".docx"):
+        if filename.endswith(".docx"):
             return extract_text_from_docx(uploaded_file)
-        elif filename.endswith(".txt"):
+        if filename.endswith(".txt"):
             return extract_text_from_txt(uploaded_file)
         return ""
     except Exception as e:
@@ -214,7 +214,7 @@ def run_llm(prompt, max_new_tokens=180):
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 num_beams=4,
-                early_stopping=True
+                early_stopping=True,
             )
 
         decoded = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
@@ -230,14 +230,17 @@ def parse_json_array(output_text):
         if start != -1 and end != -1 and end > start:
             data = json.loads(output_text[start:end + 1])
             if isinstance(data, list):
-                cleaned = []
-                for item in data:
-                    s = str(item).strip()
-                    if s:
-                        cleaned.append(s)
-                return sorted(list(set(cleaned)))
+                return sorted(
+                    list(
+                        {
+                            str(item).strip().lower()
+                            for item in data
+                            if str(item).strip()
+                        }
+                    )
+                )
     except Exception:
-        pass
+        return []
 
     return []
 
@@ -249,107 +252,79 @@ def ai_identify_resume_skills(resume_text):
     relevant_text = extract_resume_relevant_text(resume_text)
 
     prompt = f"""
-You are extracting skills from a resume.
+You are extracting actual skills from a resume.
 
-Read the text and identify the actual skills the candidate has.
+Task:
+Return only the real skills the candidate has.
 
-Important:
-- Prioritize the explicit SKILLS SECTION first.
-- Then add additional real skills shown in experience and projects.
-- Include tools, software, programming languages, platforms, methods, certifications, and technical/professional skills.
-- Do not include names, schools, cities, dates, GPA, employers, publication titles, or role titles.
+Include:
+- programming languages
+- software
+- tools
+- platforms
+- technical methods
+- certifications
+- clearly demonstrated professional skills
 
-Return ONLY valid JSON in this format:
-["skill 1", "skill 2", "skill 3"]
+Do not include:
+- names
+- schools
+- locations
+- dates
+- GPA
+- employers
+- publication titles
+- role titles
+- section headers
+- explanations
+
+Return ONLY valid JSON.
+Return a JSON array of strings.
 
 Resume text:
 {relevant_text[:2200]}
 """
 
     output = run_llm(prompt, max_new_tokens=160)
-    skills = parse_json_array(output)
-
-    # Fallback: if the model fails badly, ask a second simpler extraction only on the skills section
-    if not skills:
-        skills_only = extract_section(
-            resume_text,
-            start_labels=["skills"],
-            stop_labels=["activities", "publications", "projects", "education", "experience"]
-        )
-
-        if skills_only:
-            fallback_prompt = f"""
-Extract the actual skills from this resume skills section.
-
-Return ONLY valid JSON like:
-["python", "sql", "tableau"]
-
-Text:
-{skills_only[:1200]}
-"""
-            output = run_llm(fallback_prompt, max_new_tokens=120)
-            skills = parse_json_array(output)
-
-    return skills
+    return parse_json_array(output)
 
 
 def ai_identify_job_skills(job_text):
     relevant_text = extract_job_relevant_text(job_text)
 
     prompt = f"""
-You are extracting required or preferred skills from a job description.
+You are extracting actual required or preferred skills from a job description.
 
-Read the text and identify the actual job skills.
+Task:
+Return only the real skills required or preferred for this job.
 
 Include:
-- tools
-- software
 - programming languages
+- software
+- tools
 - platforms
 - technical methods
 - certifications
 - domain knowledge
-- technical/professional skills required for the role
+- required professional skills
 
 Do not include:
-- company description
+- company descriptions
 - benefits
 - locations
-- generic marketing language
-- job titles by themselves
+- marketing language
+- role titles by themselves
+- explanations
 
-Return ONLY valid JSON in this format:
-["skill 1", "skill 2", "skill 3"]
+Return ONLY valid JSON.
+Return a JSON array of strings.
 
 Job text:
 {relevant_text[:2200]}
 """
 
     output = run_llm(prompt, max_new_tokens=160)
-    skills = parse_json_array(output)
-
-    # Fallback: ask only on qualifications if needed
-    if not skills:
-        qualifications = extract_section(
-            job_text,
-            start_labels=["qualifications"],
-            stop_labels=["experience", "education", "compensation", "benefits", "work environment", "co only"]
-        )
-
-        if qualifications:
-            fallback_prompt = f"""
-Extract the actual required skills from this qualifications section.
-
-Return ONLY valid JSON like:
-["python", "sql", "tableau"]
-
-Text:
-{qualifications[:1200]}
-"""
-            output = run_llm(fallback_prompt, max_new_tokens=120)
-            skills = parse_json_array(output)
-
-    return skills
+    return parse_json_array(output)
 
 
 # =========================================================
@@ -384,12 +359,12 @@ def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skil
     prompt = f"""
 You are a professional resume assistant.
 
-Using the resume and job description below, write:
+Write:
 1. Three practical resume improvements
 2. Two bullet point rewrite ideas
-3. One short professional summary
+3. One short professional summary tailored to the job
 
-Use the matched and missing skills below.
+Use the information below.
 Do not invent fake experience.
 Be concise.
 
