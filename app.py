@@ -1,4 +1,3 @@
-import re
 import time
 
 import docx
@@ -23,9 +22,6 @@ st.write(
 )
 
 
-# =========================================================
-# LOAD MODELS
-# =========================================================
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -84,100 +80,16 @@ def extract_uploaded_text(uploaded_file):
 
 
 # =========================================================
-# CLEANING
+# TEXT PREP
 # =========================================================
-def clean_text(text):
-    text = text.replace("\r", "\n")
-    text = text.replace("\t", " ")
-    text = re.sub(r"[•▪◦]", "•", text)
-    text = re.sub(r"\n+", "\n", text)
-    text = re.sub(r"[ ]+", " ", text)
-    return text.strip()
-
-
-def normalize_skill(skill):
-    skill = skill.lower().strip()
-    skill = re.sub(r"^[\-\*\•\d\.\)\(]+", "", skill)
-    skill = re.sub(r"[^a-zA-Z0-9\+\#\.\-/& ]", "", skill)
-    skill = re.sub(r"\s+", " ", skill).strip()
-    return skill
-
-
-def is_valid_skill(skill):
-    if not skill:
-        return False
-    if len(skill) < 2 or len(skill) > 50:
-        return False
-    if len(skill.split()) > 5:
-        return False
-
-    bad_exact = {
-        "resume", "job", "description", "candidate", "employee", "applicant",
-        "skills", "experience", "projects", "education", "activities",
-        "company", "organization", "none", "n/a", "answer", "output",
-        "intern", "data analytics intern", "data analysis intern"
-    }
-    if skill in bad_exact:
-        return False
-
-    bad_contains = [
-        "@", "http", "www", ".com", ".org", ".edu",
-        "benefits", "salary", "compensation", "location",
-        "equal opportunity", "full time", "part time",
-        "expected graduation", "gpa", "return only",
-        "do not include", "do not explain", "comma-separated",
-        "job description", "resume skills section",
-        "resume projects and experience"
-    ]
-    if any(bad in skill for bad in bad_contains):
-        return False
-
-    if re.search(r"\b(19|20)\d{2}\b", skill):
-        return False
-
-    return True
-
-
-def dedupe_skills(skills):
-    replacements = {
-        "microsoft office suite": "microsoft office",
-        "basic rstudio": "rstudio",
-        "basic matlab": "matlab",
-        "tableau or similar": "tableau",
-        "spark is a plus": "spark",
-        "proficiency in python": "python",
-        "power bi or similar": "power bi",
-        "data models": "data modeling",
-        "data analytics": "data analysis",
-        "statistical analysis": "statistics",
-    }
-
-    cleaned = []
-    seen = set()
-
-    for skill in skills:
-        s = normalize_skill(skill)
-        s = replacements.get(s, s)
-
-        if not is_valid_skill(s):
-            continue
-
-        if s not in seen:
-            seen.add(s)
-            cleaned.append(s)
-
-    return sorted(cleaned)
-
-
-def parse_llm_list(output_text):
-    parts = re.split(r",|\n|;", output_text)
-    return dedupe_skills([p.strip() for p in parts if p.strip()])
+def prepare_text(text):
+    return text.replace("\r", "\n").replace("\t", " ").strip()
 
 
 # =========================================================
 # LLM HELPER
 # =========================================================
-def run_llm(prompt, max_new_tokens=120):
+def run_llm(prompt, max_new_tokens=160):
     try:
         inputs = tokenizer(
             prompt,
@@ -192,8 +104,7 @@ def run_llm(prompt, max_new_tokens=120):
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 num_beams=5,
-                early_stopping=True,
-                no_repeat_ngram_size=2
+                early_stopping=True
             )
 
         decoded = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
@@ -202,149 +113,78 @@ def run_llm(prompt, max_new_tokens=120):
         return ""
 
 
-# =========================================================
-# SECTION HELPERS
-# =========================================================
-def extract_resume_skills_section(resume_text):
-    text = clean_text(resume_text)
-    match = re.search(
-        r"skills\s*:(.*?)(activities\s*:|publications\s*:|projects\s*:|education\s*:|experience\s*:|$)",
-        text,
-        flags=re.IGNORECASE | re.DOTALL
-    )
-    if match:
-        return match.group(1).strip()
-    return ""
-
-
-def extract_resume_project_experience_section(resume_text):
-    text = clean_text(resume_text)
-    chunks = []
-
-    for section_name in ["experience", "projects"]:
-        match = re.search(
-            rf"{section_name}\s*:(.*?)(education\s*:|skills\s*:|activities\s*:|publications\s*:|$)",
-            text,
-            flags=re.IGNORECASE | re.DOTALL
-        )
-        if match:
-            chunks.append(match.group(1).strip())
-
-    return "\n".join(chunks).strip()
-
-
-def extract_job_relevant_section(job_text):
-    text = clean_text(job_text)
-    chunks = []
-
-    for section_name in ["qualifications", "requirements", "experience", "responsibilities", "position summary"]:
-        match = re.search(
-            rf"{section_name}\s*:(.*?)(benefits\s*:|compensation\s*:|education\s*:|work environment\s*:|co only\s*:|$)",
-            text,
-            flags=re.IGNORECASE | re.DOTALL
-        )
-        if match:
-            chunks.append(match.group(1).strip())
-
-    if chunks:
-        return "\n".join(chunks).strip()
-
-    return text[:2000]
+def parse_ai_list(output_text):
+    parts = output_text.replace("\n", ",").split(",")
+    return sorted(list(set([part.strip() for part in parts if part.strip()])))
 
 
 # =========================================================
-# FALLBACK PARSERS
-# =========================================================
-def parse_explicit_resume_skills(resume_text):
-    skills_section = extract_resume_skills_section(resume_text)
-    if not skills_section:
-        return []
-
-    raw = re.split(r",|\n|;|•", skills_section)
-    return dedupe_skills([x.strip() for x in raw if x.strip()])
-
-
-def parse_simple_job_terms(job_text):
-    relevant = extract_job_relevant_section(job_text)
-
-    patterns = [
-        r"\bpython\b", r"\br\b", r"\bsql\b", r"\bpower bi\b", r"\btableau\b",
-        r"\bhadoop\b", r"\bspark\b", r"\bmachine learning\b",
-        r"\bpredictive modeling\b", r"\bstatistics\b", r"\bstatistical analysis\b",
-        r"\bdata analytics\b", r"\bdata analysis\b", r"\bdata models?\b",
-        r"\banomaly detection\b", r"\bspc\b", r"\brma\b", r"\bmicrosoft office\b"
-    ]
-
-    found = []
-    lowered = relevant.lower()
-    for pattern in patterns:
-        matches = re.findall(pattern, lowered)
-        for m in matches:
-            found.append(m)
-
-    return dedupe_skills(found)
-
-
-# =========================================================
-# AI SKILL IDENTIFICATION
+# AI SKILL EXTRACTION
 # =========================================================
 def ai_identify_resume_skills(resume_text):
-    skills_section = extract_resume_skills_section(resume_text)
-    exp_proj_section = extract_resume_project_experience_section(resume_text)
-
-    explicit_skills = parse_explicit_resume_skills(resume_text)
-
     prompt = f"""
-Extract real professional skills from this resume text.
+Read this resume and identify the skills the person actually has.
 
-Only include:
-tools, software, programming languages, platforms, technical methods,
-certifications, and job-relevant professional skills.
+Include only real skills the person demonstrates or explicitly lists, such as:
+- software
+- tools
+- programming languages
+- platforms
+- technical methods
+- certifications
+- professional skills
 
 Do not include:
-names, schools, locations, GPA, dates, employers, or publication citations.
+- names
+- schools
+- locations
+- dates
+- GPA
+- employers
+- publication titles
+- paper citations
+- section headers
 
-Return only a comma-separated list.
+Return only a comma-separated list of skills.
 
-Skills Section:
-{skills_section[:1000]}
-
-Projects and Experience:
-{exp_proj_section[:1200]}
+Resume:
+{resume_text[:2500]}
 """
 
-    llm_output = run_llm(prompt, max_new_tokens=100)
-    llm_skills = parse_llm_list(llm_output)
-
-    combined = dedupe_skills(explicit_skills + llm_skills)
-    return combined
+    output = run_llm(prompt, max_new_tokens=140)
+    return parse_ai_list(output)
 
 
 def ai_identify_job_skills(job_text):
-    relevant_job_text = extract_job_relevant_section(job_text)
-    fallback_terms = parse_simple_job_terms(job_text)
-
     prompt = f"""
-Extract the required or preferred skills from this job text.
+Read this job description and identify the required or preferred skills.
 
-Only include:
-tools, software, programming languages, platforms, methods,
-certifications, domain knowledge, and technical/professional skills.
+Include only:
+- software
+- tools
+- programming languages
+- platforms
+- technical methods
+- certifications
+- domain knowledge
+- professional skills required for the role
 
 Do not include:
-company descriptions, benefits, locations, marketing phrases, or sentence fragments.
+- company descriptions
+- benefits
+- locations
+- marketing text
+- sentence fragments
+- section headers
 
-Return only a comma-separated list.
+Return only a comma-separated list of skills.
 
-Job Text:
-{relevant_job_text[:1800]}
+Job Description:
+{job_text[:2500]}
 """
 
-    llm_output = run_llm(prompt, max_new_tokens=100)
-    llm_skills = parse_llm_list(llm_output)
-
-    combined = dedupe_skills(fallback_terms + llm_skills)
-    return combined
+    output = run_llm(prompt, max_new_tokens=140)
+    return parse_ai_list(output)
 
 
 # =========================================================
@@ -369,19 +209,21 @@ def compare_skills(resume_text, job_text):
     if len(job_skills) > 0:
         percent = round((len(matched) / len(job_skills)) * 100, 2)
 
-    return job_skills, resume_skills, matched, missing, extra, percent
+    return sorted(job_skills), sorted(resume_skills), matched, missing, extra, percent
 
 
 # =========================================================
-# SUGGESTIONS
+# AI SUGGESTIONS
 # =========================================================
 def generate_llm_suggestions(resume_text, job_text, matched_skills, missing_skills):
     prompt = f"""
+Compare this resume to this job description.
+
 Resume:
-{resume_text[:1500]}
+{resume_text[:1800]}
 
 Job Description:
-{job_text[:1500]}
+{job_text[:1800]}
 
 Matched Skills:
 {", ".join(matched_skills)}
@@ -389,28 +231,18 @@ Matched Skills:
 Missing Skills:
 {", ".join(missing_skills)}
 
-Task:
-Write exactly 3 resume improvement suggestions, 2 bullet rewrite ideas, and 1 short professional summary.
+Write exactly:
+1. Three practical improvements
+2. Two stronger bullet point rewrite ideas
+3. One short professional summary tailored to the job
 
-Format:
-Improvements:
-1.
-2.
-3.
-
-Bullet Rewrites:
-1.
-2.
-
-Summary:
+Keep it concise.
 """
 
     output = run_llm(prompt, max_new_tokens=220)
-
-    if not output.strip():
-        return "AI suggestions are unavailable right now."
-
-    return output
+    if output.strip():
+        return output
+    return "AI suggestions are unavailable right now."
 
 
 # =========================================================
@@ -444,19 +276,19 @@ if analyze:
             resume_text = extract_uploaded_text(uploaded_resume)
             job_text = job_description
 
-            clean_resume = clean_text(resume_text)
-            clean_job = clean_text(job_text)
+            prepared_resume = prepare_text(resume_text)
+            prepared_job = prepare_text(job_text)
 
-            score = compute_match_score(clean_resume, clean_job)
+            score = compute_match_score(prepared_resume, prepared_job)
 
             job_skills, resume_skills, matched, missing, extra, percent = compare_skills(
-                clean_resume,
-                clean_job
+                prepared_resume,
+                prepared_job
             )
 
             llm_output = generate_llm_suggestions(
-                clean_resume,
-                clean_job,
+                prepared_resume,
+                prepared_job,
                 matched,
                 missing
             )
@@ -476,10 +308,10 @@ if analyze:
             st.metric("Missing Skills", len(missing))
 
         st.markdown("## Skills Identified in Job Description")
-        st.write(", ".join(sorted(job_skills)) if job_skills else "No skills found.")
+        st.write(", ".join(job_skills) if job_skills else "No skills found.")
 
         st.markdown("## Skills Identified in Resume")
-        st.write(", ".join(sorted(resume_skills)) if resume_skills else "No skills found.")
+        st.write(", ".join(resume_skills) if resume_skills else "No skills found.")
 
         st.markdown("## Matched Skills")
         st.write(", ".join(matched) if matched else "No matched skills found.")
