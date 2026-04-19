@@ -24,7 +24,7 @@ st.title("HireSense")
 st.subheader("AI Resume & Job Description Matching Web Application")
 
 st.write(
-    "Upload a resume (PDF or Word file) and paste a job description to receive an overall match score, "
+    "Upload a resume (Word file) and paste a job description to receive an overall match score, "
     "AI-extracted skills, and AI-generated improvement suggestions."
 )
 
