@@ -24,14 +24,14 @@ st.title("HireSense")
 st.subheader("AI Resume & Job Description Matching Web Application")
 
 st.write(
-    "Upload a resume and paste a job description to receive an overall match score, "
+    "Upload a resume (PDF or Word file) and paste a job description to receive an overall match score, "
     "AI-extracted skills, and AI-generated improvement suggestions."
 )
 
 
-# =========================================================
+
 # LOAD MODELS
-# =========================================================
+
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -46,9 +46,9 @@ embed_model = load_embedding_model()
 hf_client = load_llm_client()
 
 
-# =========================================================
+
 # FILE READING
-# =========================================================
+
 def extract_text_from_pdf(uploaded_file):
     text = ""
     with pdfplumber.open(uploaded_file) as pdf:
@@ -87,16 +87,16 @@ def extract_uploaded_text(uploaded_file):
         return ""
 
 
-# =========================================================
+
 # BASIC TEXT PREP
-# =========================================================
+
 def prepare_text(text):
     return text.replace("\r", "\n").replace("\t", " ").strip()
 
 
-# =========================================================
+
 # LLM HELPERS
-# =========================================================
+
 def run_chat(messages, max_tokens=500):
     try:
         completion = hf_client.chat_completion(
@@ -123,9 +123,9 @@ def parse_json_array(text):
     return []
 
 
-# =========================================================
+
 # AI EXTRACTION
-# =========================================================
+
 def ai_identify_resume_skills(resume_text):
     messages = [
         {
@@ -260,9 +260,9 @@ Job Description:
     return output
 
 
-# =========================================================
+
 # MATCHING
-# =========================================================
+
 def compute_match_score(resume_text, job_text):
     resume_emb = embed_model.encode([resume_text])
     job_emb = embed_model.encode([job_text])
@@ -285,17 +285,17 @@ def compare_skills(resume_text, job_text):
     return sorted(job_skills), sorted(resume_skills), matched, missing, extra, percent
 
 
-# =========================================================
+
 # UI
-# =========================================================
+
 uploaded_resume = st.file_uploader("Upload Resume", type=["pdf", "docx", "txt"])
 job_description = st.text_area("Paste Job Description", height=300)
 analyze = st.button("Analyze")
 
 
-# =========================================================
+
 # MAIN
-# =========================================================
+
 if analyze:
     if not HF_TOKEN:
         st.error("Missing HF_TOKEN. Add it to Streamlit secrets or environment variables.")
